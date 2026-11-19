@@ -15,8 +15,7 @@ npm-debug.log*
 test-results/
 coverage/
 
-# Build output
-dist/
+# Build output (FRONTEND/dist is committed on purpose so the server can just git pull)
 build/
 
 # Data / spreadsheets (may contain real staff or customer data)
