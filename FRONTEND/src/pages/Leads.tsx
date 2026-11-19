@@ -1,0 +1,2280 @@
+import { useState, useMemo, useEffect, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
+import { LeadDetailDialog } from "@/components/leads/LeadDetailDialog";
+import { WhatsAppQuickChat } from "@/components/shared/WhatsAppQuickChat";
+import { useOpenCreateModal } from "@/hooks/useOpenCreateModal";
+import { Plus, Search, ChevronDown, MoreHorizontal, Filter, Mail, User, Building2, Calendar, Tag as TagIcon, X, Trash2, Users, Edit, Eye, UserCheck, AlertTriangle, AlertOctagon, KanbanSquare, List, StickyNote, SlidersHorizontal, MessageCircle, Bell } from "lucide-react";
+import { ConvertLeadDialog } from "@/components/leads/ConvertLeadDialog";
+import { LeadsOverview } from "@/components/leads/LeadsOverview";
+import { MarketingSpendDialog } from "@/components/leads/MarketingSpendDialog";
+import { FollowUpsSheet, type FollowUpBucket } from "@/components/leads/FollowUpsSheet";
+import { useNotificationContext } from "@/context/NotificationContext";
+import { useLeadFeatures } from "@/hooks/useLeadFeatures";
+
+import { cn } from "@/lib/utils";
+import { LANGUAGE_NAMES } from "@/lib/languages";
+
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { leadService } from "@/api/services/lead.service";
+import { formatDate, formatDateTime } from "@/lib/dateFormat";
+import { TableActions } from "@/components/TableActions";
+import { useToast } from "@/hooks/use-toast";
+import { Skeleton } from "@/components/ui/skeleton";
+import { toast as SonnerToast } from "sonner";
+import { usePermissions } from "@/hooks/usePermissions";
+import { isTrinetraPilotUser } from "@/lib/trinetraPilot";
+import { hrmsbranchService } from "@/hrms/services/hrmsbranchService";
+import { useCurrency } from "@/context/CurrencyContext";
+import { staffService } from "@/api/services/staff.service";
+import { customFieldService } from "@/api/services/custom-field.service";
+import { noteService } from "@/api/services/note.service";
+import { useSettings } from "@/context/SettingsContext";
+import { Textarea } from "@/components/ui/textarea";
+import { ExportButton } from "@/components/ui/export-button";
+import { ImportButton } from "@/components/ui/import-button";
+import { MetaFormsFilterDropdown } from "@/components/leads/MetaFormsFilterDropdown";
+import { LeadColumnSettings } from "@/components/leads/LeadColumnSettings";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  DropdownMenu,
+  DropdownMenuContent, 
+  DropdownMenuItem, 
+  DropdownMenuTrigger 
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogClose,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { LeadsKanban } from "@/pages/LeadsKanban";
+import { MetaAdsDialog } from "@/components/leads/MetaAdsDialog";
+import { metaIntegrationService } from "@/api/services/metaIntegration.service";
+import { WebsiteFormsDialog } from "@/components/leads/WebsiteFormsDialog";
+import { AdminTablePageSkeleton } from "@/components/ui/page-skeleton";
+import { useMinimumLoading } from "@/hooks/useMinimumLoading";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell, TableEmpty, TablePagination } from "@/components/ui/table";
+import { defaultPageSize } from "@/lib/tablePageSize";
+
+const DATE_FILTER_OPTIONS = [
+  { value: "all", label: "All Time" },
+  { value: "today", label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
+  { value: "this_week", label: "This Week" },
+  { value: "this_month", label: "This Month" },
+  { value: "last_7_days", label: "Last 7 Days" },
+  { value: "last_30_days", label: "Last 30 Days" },
+  { value: "custom", label: "Custom Range" },
+];
+
+const Leads = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = searchParams.get("view") === "kanban" ? "kanban" : "list";
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [metaFormFilter, setMetaFormFilter] = useState("all");
+  const [dateFilter, setDateFilter] = useState("all");
+  const [customDateFrom, setCustomDateFrom] = useState("");
+  const [customDateTo, setCustomDateTo] = useState("");
+  const [itemsPerPage, setItemsPerPage] = useState<number | "all">(() => defaultPageSize(25));
+  const [currentPage, setCurrentPage] = useState(1);
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [assignedFilter, setAssignedFilter] = useState("all");
+  const [campaignFilter, setCampaignFilter] = useState("");
+  const [debouncedCampaign, setDebouncedCampaign] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedCampaign(campaignFilter.trim()), 350);
+    return () => clearTimeout(t);
+  }, [campaignFilter]);
+  const [whatsappOnly, setWhatsappOnly] = useState(false);
+  const [convertedFilter, setConvertedFilter] = useState<"all" | "yes" | "no">("all");
+  const [reminderFilter, setReminderFilter] = useState<"all" | "today" | "overdue" | "upcoming" | "none">("all");
+  const [followUpsOpen, setFollowUpsOpen] = useState(false);
+  const [followUpsBucket, setFollowUpsBucket] = useState<FollowUpBucket>("today");
+  const [spendOpen, setSpendOpen] = useState(false);
+  const [convertLead, setConvertLead] = useState<any>(null);
+  const advancedFilterCount =
+    (sourceFilter !== "all" ? 1 : 0) +
+    (assignedFilter !== "all" ? 1 : 0) +
+    (debouncedCampaign ? 1 : 0) +
+    (whatsappOnly ? 1 : 0) +
+    (convertedFilter !== "all" ? 1 : 0) +
+    (reminderFilter !== "all" ? 1 : 0);
+  const clearAdvancedFilters = () => {
+    setSourceFilter("all");
+    setAssignedFilter("all");
+    setCampaignFilter("");
+    setWhatsappOnly(false);
+    setConvertedFilter("all");
+    setReminderFilter("all");
+  };
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, statusFilter, metaFormFilter, dateFilter, customDateFrom, customDateTo, sourceFilter, assignedFilter, debouncedCampaign, whatsappOnly, convertedFilter, reminderFilter]);
+  const [selectedLeads, setSelectedLeads] = useState<string[]>([]);
+  const [viewItem, setViewItem] = useState(null);
+  const [editItem, setEditItem] = useState(null);
+  
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const { can, user, isModuleEnabled, isAdmin } = usePermissions();
+  // Add-ons the super admin enabled for this company (WhatsApp capture,
+  // marketing spend, patient conversion, follow-ups dashboard).
+  const leadFeatures = useLeadFeatures();
+  const hasConversion = leadFeatures.has("patient_conversion");
+  const hasFollowups = leadFeatures.has("lead_followups");
+  const hasWhatsAppLeads = leadFeatures.has("whatsapp_leads");
+  const hasSpend = leadFeatures.has("marketing_spend");
+  const { getSetting } = useSettings();
+  const isPilot = isTrinetraPilotUser(user?.email);
+  // Branch is sourced from the HRMS module — only show/fetch it when the
+  // tenant's plan actually includes HRMS, even for a pilot-flagged user.
+  const canUseBranch = isPilot && isModuleEnabled("hrms");
+  const { data: branchesRaw = [] } = useQuery<any[]>({
+    queryKey: ["hrms-branches-list"],
+    queryFn: () => hrmsbranchService.getAll().then((r) => r.data || []),
+    enabled: canUseBranch,
+    staleTime: 5 * 60 * 1000,
+  });
+  const branches: { _id: string; name: string }[] = branchesRaw;
+  const { symbol, formatAmount } = useCurrency();
+  const [isNewLeadOpen, setIsNewLeadOpen] = useState(false);
+  useOpenCreateModal(() => openModal("create")); // openModal resets the form (avoids stale edit/view data)
+  const [modalMode, setModalMode] = useState<"create" | "edit" | "view">("create");
+  const [selectedLead, setSelectedLead] = useState<any>(null);
+  const [bulkActionOpen, setBulkActionOpen] = useState(false);
+  const [bulkState, setBulkState] = useState({
+    massDelete: false,
+    convertToCustomer: false,
+    status: "",
+    source: "",
+    assigned: "",
+    salesPerson: "",
+    tags: "",
+    is_public: false,
+    contacted_today: false,
+    mark_lost: false,
+  });
+  const [isBulkLoading, setIsBulkLoading] = useState(false);
+  const [newStatusName, setNewStatusName] = useState("");
+  const [newSourceName, setNewSourceName] = useState("");
+  const [isAddingStatus, setIsAddingStatus] = useState(false);
+  const [isAddingSource, setIsAddingSource] = useState(false);
+
+  const [leadForm, setLeadForm] = useState({
+    status: "", source: "", assigned: "", salesPerson: "", branch: "", tags: "", name: "", position: "", email: "", website: "",
+    phonenumber: "", lead_value: "", company: "", address: "", city: "", state: "", country: "",
+    zip: "", default_language: "English", description: "", is_public: false, contacted_today: false,
+    followup_date: ""
+  });
+
+  // Resolves the symbolic date-range filter into explicit boundaries using
+  // the BROWSER's local "now" (matching what this filter always compared
+  // against), so the server just does a plain range query instead of
+  // re-deriving "today" in its own timezone.
+  const resolveDateRange = (): { from?: Date; to?: Date } => {
+    if (dateFilter === "all") return {};
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    switch (dateFilter) {
+      case "today":
+        return { from: startOfToday };
+      case "yesterday": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - 1);
+        return { from: start, to: new Date(startOfToday.getTime() - 1) };
+      }
+      case "this_week": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - start.getDay());
+        return { from: start };
+      }
+      case "this_month":
+        return { from: new Date(now.getFullYear(), now.getMonth(), 1) };
+      case "last_7_days": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - 6);
+        return { from: start };
+      }
+      case "last_30_days": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - 29);
+        return { from: start };
+      }
+      case "custom":
+        return {
+          from: customDateFrom ? new Date(`${customDateFrom}T00:00:00`) : undefined,
+          to: customDateTo ? new Date(`${customDateTo}T23:59:59.999`) : undefined,
+        };
+      default:
+        return {};
+    }
+  };
+
+  interface LeadsPage { rows: any[]; total: number; pages: number; statusCounts: Record<string, number> }
+  const { data: leadsResult, isLoading } = useQuery<LeadsPage>({
+    queryKey: ["leads", itemsPerPage, currentPage, debouncedSearch, statusFilter, metaFormFilter, dateFilter, customDateFrom, customDateTo, sourceFilter, assignedFilter, debouncedCampaign, whatsappOnly, convertedFilter, reminderFilter],
+    queryFn: async () => {
+      if (itemsPerPage === "all") {
+        const response = await leadService.getAll({ insights: "1" });
+        const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+        // Status-card counts always reflect the whole tenant, before any
+        // filters — matches the paginated path's server-side aggregate.
+        const statusCounts: Record<string, number> = {};
+        rows.forEach((l: any) => {
+          const id = String(typeof l.status === "object" ? l.status?._id : l.status);
+          statusCounts[id] = (statusCounts[id] || 0) + 1;
+        });
+        return { rows, total: rows.length, pages: 1, statusCounts };
+      }
+
+      const range = resolveDateRange();
+      const res: any = await leadService.getAll({
+        page: currentPage,
+        limit: itemsPerPage,
+        search: debouncedSearch || undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        metaForm: metaFormFilter !== "all" ? metaFormFilter : undefined,
+        dateFrom: range.from?.toISOString(),
+        dateTo: range.to?.toISOString(),
+        source: sourceFilter !== "all" ? sourceFilter : undefined,
+        assigned: assignedFilter !== "all" ? assignedFilter : undefined,
+        campaign: debouncedCampaign || undefined,
+        whatsapp: whatsappOnly ? "1" : undefined,
+        converted: convertedFilter !== "all" ? convertedFilter : undefined,
+        reminder: reminderFilter !== "all" ? reminderFilter : undefined,
+      });
+      if (Array.isArray(res)) return { rows: [], total: 0, pages: 1, statusCounts: {} };
+      const statusCounts: Record<string, number> = {};
+      (res?.statusCounts ?? []).forEach((s: any) => {
+        if (s.status) statusCounts[s.status] = s.count;
+      });
+      return { rows: res?.data ?? [], total: res?.total ?? 0, pages: res?.pages ?? 1, statusCounts };
+    },
+    placeholderData: keepPreviousData,
+  });
+  const leads: any[] = leadsResult?.rows ?? [];
+
+  const { data: statuses = [] } = useQuery<any[]>({
+    queryKey: ["lead-statuses"],
+    queryFn: leadService.getStatuses,
+  });
+
+  const { data: sources = [] } = useQuery<any[]>({
+    queryKey: ["lead-sources"],
+    queryFn: leadService.getSources,
+  });
+
+  const { data: staff = [] } = useQuery<any[]>({
+    queryKey: ["staff"],
+    queryFn: staffService.getAll,
+  });
+
+  // Mirrors the backend's whatsappLeadCondition: created by the WhatsApp
+  // integration, or tagged with the "WhatsApp" source.
+  const isWhatsAppLead = (l: any) => {
+    if (l?.origin === "whatsapp") return true;
+    const name = typeof l?.source === "object" ? l.source?.name : sources.find((s: any) => s._id === l?.source)?.name;
+    return /^whatsapp$/i.test(String(name || "").trim());
+  };
+
+  const confirmedStatusId: string | undefined = useMemo(
+    () => (statuses as any[]).find((s) => /^confirm/i.test(String(s.name || "").trim()))?._id,
+    [statuses]
+  );
+
+  // New WhatsApp enquiries (and replies on existing leads) arrive over the
+  // socket from the WhatsApp webhook — refresh the list and overview live.
+  const { socket } = useNotificationContext();
+  useEffect(() => {
+    if (!socket) return;
+    const handler = (payload: any) => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      if (payload?.created) {
+        SonnerToast.success(`New WhatsApp lead: ${payload.name || payload.mobile || ""}`);
+      }
+    };
+    socket.on("lead:whatsapp", handler);
+    return () => { socket.off("lead:whatsapp", handler); };
+  }, [socket, queryClient]);
+
+  // Shares the ["meta-integration"] cache with MetaAdsDialog — whichever
+  // fetches first populates it for both, so connected forms show up here
+  // without waiting on that dialog to be opened.
+  const { data: metaIntegrationData } = useQuery<any>({
+    queryKey: ["meta-integration"],
+    queryFn: () => metaIntegrationService.get(),
+  });
+
+  // Auto-sync Meta Lead Ads on page load, so staff never have to open the
+  // Meta Ads dialog and click Sync/Import manually — those buttons stay as
+  // a manual override, this just does the same two calls automatically.
+  // Cooldown-gated on `last_synced` (10 min) so repeated visits/refreshes to
+  // this page don't hammer Meta's Graph API and risk rate-limiting.
+  const metaAutoSyncedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const connections: any[] = metaIntegrationData?.connections || [];
+    if (connections.length === 0) return;
+
+    const COOLDOWN_MS = 10 * 60 * 1000;
+    const now = Date.now();
+
+    connections.forEach((integration: any) => {
+      const pageId = integration.page_id;
+      if (!pageId || metaAutoSyncedRef.current.has(pageId)) return;
+
+      const lastSynced = integration.last_synced ? new Date(integration.last_synced).getTime() : 0;
+      if (now - lastSynced < COOLDOWN_MS) return;
+
+      metaAutoSyncedRef.current.add(pageId);
+      (async () => {
+        try {
+          await metaIntegrationService.sync(pageId);
+          const data: any = await metaIntegrationService.importLeads(pageId);
+          queryClient.invalidateQueries({ queryKey: ["meta-integration"] });
+          queryClient.invalidateQueries({ queryKey: ["leads"] });
+          queryClient.invalidateQueries({ queryKey: ["custom-fields", "leads"] });
+
+          // Same toast copy as the manual "Import" button in MetaAdsDialog —
+          // only shown when something actually happened, so a page visit
+          // that finds nothing new to import stays silent (this can fire
+          // once every 10 min per connected page, so a toast every time
+          // would get noisy fast otherwise).
+          if (data?.imported > 0) {
+            const parts = [`${data.imported} new lead${data.imported === 1 ? "" : "s"} imported`];
+            if (data.skipped_duplicates) parts.push(`${data.skipped_duplicates} already in CRM (skipped)`);
+            if (data.truncated) parts.push("form has more leads than one import can pull — run Import again to continue");
+            toast({ title: "Import Complete", description: parts.join(", ") });
+          }
+        } catch (error) {
+          // Silent — this runs in the background on every page load, so it
+          // must never interrupt the user. The Sync/Import buttons in the
+          // Meta Ads dialog still surface real errors when clicked manually.
+          console.warn(`[Meta auto-sync] page ${pageId} failed:`, error);
+        }
+      })();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metaIntegrationData]);
+
+  const { data: customFieldsRaw = [] } = useQuery<any[]>({
+    queryKey: ["custom-fields", "leads"],
+    queryFn: async () => {
+      const response = await customFieldService.getAll("leads");
+      return Array.isArray(response) ? response : [];
+    },
+  });
+
+  const customFieldDefs = useMemo(
+    () => customFieldsRaw.filter((cf: any) => cf.active !== false),
+    [customFieldsRaw]
+  );
+
+  // Meta-sourced columns (auto-created per question, slug "meta_<key>") are
+  // kept separate from manually-defined ones — "All Leads" only shows the
+  // manual/shared columns, since mixing every ad's own questions into one
+  // view would be sparse and confusing. A specific ad's tab adds back just
+  // that ad's own questions.
+  const commonCustomFields = useMemo(
+    () => customFieldDefs.filter((cf: any) => cf.show_on_table && !cf.slug?.startsWith("meta_")),
+    [customFieldDefs]
+  );
+  const metaCustomFields = useMemo(
+    () => customFieldDefs.filter((cf: any) => cf.show_on_table && cf.slug?.startsWith("meta_")),
+    [customFieldDefs]
+  );
+  const formSpecificCustomFields = useMemo(() => {
+    if (metaFormFilter === "all" || metaCustomFields.length === 0) return [];
+    const slugsWithData = new Set<string>();
+    for (const l of leads) {
+      if (l.meta_form_id !== metaFormFilter) continue;
+      for (const cf of metaCustomFields) {
+        const val = l.custom_fields?.[cf.slug];
+        if (val !== undefined && val !== null && val !== "") slugsWithData.add(cf.slug);
+      }
+    }
+    return metaCustomFields.filter((cf: any) => slugsWithData.has(cf.slug));
+  }, [leads, metaFormFilter, metaCustomFields]);
+
+  const tableCustomFields = useMemo(
+    () => [...commonCustomFields, ...formSpecificCustomFields],
+    [commonCustomFields, formSpecificCustomFields]
+  );
+
+  const openModal = (mode: "create" | "edit" | "view", lead: any = null, initialTab?: string) => {
+    setModalMode(mode);
+    setSelectedLead(lead);
+    setIsAddingStatus(false);
+    setIsAddingSource(false);
+    if (lead) {
+      setLeadForm({
+        status: lead.status?._id || lead.status?.id || (typeof lead.status === 'string' ? lead.status : ""),
+        source: lead.source?._id || lead.source?.id || (typeof lead.source === 'string' ? lead.source : ""),
+        assigned: lead.assigned?._id || lead.assigned?.id || (typeof lead.assigned === 'string' ? lead.assigned : ""),
+        salesPerson: lead.salesPerson || "",
+        branch: typeof lead.branch === "object" ? (lead.branch?.name || "") : (lead.branch || ""),
+        tags: Array.isArray(lead.tags) ? lead.tags.join(", ") : (lead.tags || ""),
+        name: lead.name || "",
+        position: lead.position || lead.title || "",
+        email: lead.email || "",
+        website: lead.website || "",
+        phonenumber: lead.phonenumber || lead.phoneNumber || "",
+        lead_value: lead.lead_value ?? lead.leadValue ?? "",
+        company: lead.company || "",
+        address: lead.address || "",
+        city: lead.city || "",
+        state: lead.state || "",
+        country: lead.country || "",
+        zip: lead.zip || lead.zipCode || "",
+        default_language: lead.default_language || lead.defaultLanguage || "English",
+        description: lead.description || "",
+        is_public: !!(lead.is_public ?? lead.isPublic),
+        contacted_today: !!(lead.contacted_today ?? lead.contactedToday),
+        followup_date: lead.followup_date ? new Date(lead.followup_date).toISOString().split("T")[0] : ""
+      });
+    } else {
+      // Setup > Settings > Leads > Default status / Default source (id, or a name in older settings).
+      const pick = (list: any[], v: any) => {
+        const key = String(v || "").trim().toLowerCase();
+        if (!key) return "";
+        const hit = list.find((x: any) => String(x._id) === String(v)) || list.find((x: any) => String(x.name || "").toLowerCase() === key);
+        return hit ? String(hit._id) : "";
+      };
+      setLeadForm({
+        status: pick(statuses, getSetting("leadDefaultStatus", "")), source: pick(sources, getSetting("leadDefaultSource", "")), assigned: "", salesPerson: "", branch: "", tags: "", name: "", position: "", email: "", website: "",
+        phonenumber: "", lead_value: "", company: "", address: "", city: "", state: "", country: "",
+        zip: "", default_language: "English", description: "", is_public: false, contacted_today: false,
+        followup_date: ""
+      });
+    }
+    setIsNewLeadOpen(true);
+
+    // Keep the tabbed detail view's lead + tab shareable/refreshable via the URL.
+    if (mode === "view" && lead) {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("leadView", lead._id);
+        if (initialTab) next.set("tab", initialTab);
+        else if (!next.get("tab")) next.set("tab", "profile");
+        return next;
+      }, { replace: true });
+    }
+  };
+
+  const closeLeadModal = () => {
+    setIsNewLeadOpen(false);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("leadView");
+      next.delete("tab");
+      return next;
+    }, { replace: true });
+  };
+
+  // Deep link / refresh support: if the URL already points at a lead
+  // (?leadView=<id>), reopen the view modal for it — fetched directly by id
+  // rather than searched for in the loaded list, since that list is now a
+  // single page and the linked lead may not be on it.
+  useEffect(() => {
+    const leadViewId = searchParams.get("leadView");
+    if (!leadViewId || isNewLeadOpen) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response: any = await leadService.getById(leadViewId);
+        const lead = response?.data ?? response;
+        if (!cancelled && lead?._id) openModal("view", lead);
+      } catch {
+        // Lead not found or inaccessible — leave the modal closed.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const createLeadMutation = useMutation({
+    mutationFn: leadService.create,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      toast({ title: "Success", description: "Lead created successfully" });
+      closeLeadModal();
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const updateLeadMutation = useMutation({
+    mutationFn: (data: any) => leadService.update(selectedLead._id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      toast({ title: "Success", description: "Lead updated successfully" });
+      closeLeadModal();
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const updateLeadStatusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: string }) => leadService.updateLeadStatus(id, status),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      toast({ title: "Status Updated", description: "Lead status changed." });
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const deleteLeadMutation = useMutation({
+    mutationFn: leadService.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      toast({ title: "Deleted", description: "Lead removed from pipeline" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const legacyConvertMutation = useMutation({
+    mutationFn: (id: string) => leadService.convertToCustomer(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      queryClient.invalidateQueries({ queryKey: ["clients"] });
+      closeLeadModal();
+      SonnerToast.success("Lead converted to customer successfully");
+    },
+    onError: (err: any) => {
+      SonnerToast.error(err.response?.data?.message || err.message || "Failed to convert lead");
+    },
+  });
+
+  const markAsLostMutation = useMutation({
+    mutationFn: (id: string) => leadService.markAsLost(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      closeLeadModal();
+      SonnerToast.success("Lead marked as lost");
+    },
+    onError: (err: any) => {
+      SonnerToast.error(err.response?.data?.message || err.message || "Failed to mark as lost");
+    },
+  });
+
+  const markAsJunkMutation = useMutation({
+    mutationFn: (id: string) => leadService.markAsJunk(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      closeLeadModal();
+      SonnerToast.success("Lead marked as junk");
+    },
+    onError: (err: any) => {
+      SonnerToast.error(err.response?.data?.message || err.message || "Failed to mark as junk");
+    },
+  });
+
+  const importLeadsMutation = useMutation({
+    mutationFn: leadService.importLeads,
+    onSuccess: async (data: any) => {
+      setStatusFilter("all");
+      setSearch("");
+      setCurrentPage(1);
+      await queryClient.invalidateQueries({ queryKey: ["leads"] });
+      await queryClient.refetchQueries({ queryKey: ["leads"] });
+      toast({
+        title: data.count === 0 ? "No New Leads" : "Import Successful",
+        description: data.message || `Imported leads`,
+        variant: data.count === 0 ? "destructive" : "default",
+      });
+    },
+    onError: (err: any) => {
+      toast({ title: "Import Failed", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const processLeadRows = (rows: any[]) => {
+    const defaultStatusId = statuses.length > 0 ? statuses[0]._id : undefined;
+    const defaultSourceId = sources.length > 0 ? sources[0]._id : undefined;
+
+    const leadsData = rows.map((row: any) => ({
+      name: row.name || row.Name || "",
+      email: row.email || row.Email || "",
+      company: row.company || row.Company || "",
+      phonenumber: row.phonenumber || row.phone || row.Phone || "",
+      position: row.position || row.Position || row.title || row.Title || "",
+      lead_value: Number(row.lead_value || row.leadValue || row.Value || 0) || 0,
+      address: row.address || row.Address || "",
+      city: row.city || row.City || "",
+      state: row.state || row.State || "",
+      country: row.country || row.Country || "",
+      zip: row.zip || row.Zip || "",
+      status: defaultStatusId,
+      source: defaultSourceId,
+    }));
+
+    const validLeads = leadsData.filter(l => l.name);
+    if (validLeads.length === 0) {
+      toast({ title: "Error", description: "No valid leads found. Make sure a 'name' or 'Name' column exists.", variant: "destructive" });
+      return;
+    }
+    importLeadsMutation.mutate(validLeads as any);
+  };
+
+  const createStatusMutation = useMutation({
+    mutationFn: (name: string) => leadService.createStatus({ name, color: "#3b82f6", order: 0 }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["lead-statuses"] });
+      setNewStatusName("");
+      setIsAddingStatus(false);
+    }
+  });
+
+  const createSourceMutation = useMutation({
+    mutationFn: (name: string) => leadService.createSource({ name }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["lead-sources"] });
+      setNewSourceName("");
+      setIsAddingSource(false);
+    }
+  });
+
+  const handleSaveLead = () => {
+    if (modalMode === "view") return;
+    if (canUseBranch && !leadForm.branch) {
+      toast({
+        title: "Validation Error",
+        description: "Please select a branch",
+        variant: "destructive"
+      });
+      return;
+    }
+    if (!leadForm.name || !leadForm.status || !leadForm.source) {
+      toast({
+        title: "Validation Error",
+        description: "Please fill in all required fields (Name, Status, and Source)",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // Sanitize payload to avoid CastError for empty ObjectIds
+    const payload: any = { ...leadForm };
+    if (!payload.assigned) delete payload.assigned;
+    if (payload.lead_value === "" || payload.lead_value === undefined) payload.lead_value = 0;
+
+    // Map position to title for backend consistency
+    if (payload.position) payload.title = payload.position;
+
+    // Ensure tags is always a string
+    if (Array.isArray(payload.tags)) payload.tags = payload.tags.join(",");
+    else if (typeof payload.tags !== "string") payload.tags = "";
+
+    if (modalMode === "create") createLeadMutation.mutate(payload);
+    else updateLeadMutation.mutate(payload);
+  };
+
+  const handleBulkAction = async () => {
+    if (selectedLeads.length === 0) {
+      toast({ title: "Error", description: "No leads selected."});
+      return;
+    }
+    setIsBulkLoading(true);
+
+    try {
+      if (bulkState.massDelete) {
+        await leadService.bulkDelete(selectedLeads);
+        toast({ title: "Success", description: `Deleted ${selectedLeads.length} leads.` });
+      } else if (bulkState.convertToCustomer) {
+        const res: any = await leadService.bulkConvertToCustomer(selectedLeads);
+        toast({
+          title: "Success",
+          description: res?.data?.message || `Successfully converted ${selectedLeads.length} lead(s) to customer(s).`,
+        });
+        queryClient.invalidateQueries({ queryKey: ["clients"] });
+        queryClient.invalidateQueries({ queryKey: ["customers"] });
+        queryClient.invalidateQueries({ queryKey: ["lead-insights-summary"] });
+        queryClient.invalidateQueries({ queryKey: ["conversions"] });
+      } else {
+        const updates: any = {};
+        if (bulkState.status) updates.status = bulkState.status;
+        if (bulkState.source) updates.source = bulkState.source;
+        if (bulkState.assigned) updates.assigned = bulkState.assigned;
+        if (bulkState.salesPerson) updates.salesPerson = bulkState.salesPerson;
+        if (bulkState.tags) updates.tags = bulkState.tags.split(",").map(s => s.trim()).join(", ");
+        if (bulkState.is_public) updates.is_public = bulkState.is_public;
+        if (bulkState.contacted_today) updates.contacted_today = bulkState.contacted_today;
+
+        if (Object.keys(updates).length > 0) {
+          await Promise.all(selectedLeads.map(id => leadService.update(id, updates)));
+          toast({ title: "Success", description: `Updated ${selectedLeads.length} leads.` });
+        }
+      }
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      setSelectedLeads([]);
+      setBulkActionOpen(false);
+      setBulkState({ massDelete: false, convertToCustomer: false, status: "", source: "", assigned: "", salesPerson: "", tags: "", is_public: false, contacted_today: false, mark_lost: false });
+    } catch (err: any) {
+      toast({
+        title: "Error",
+        description: err?.response?.data?.message || "Failed to perform bulk action.",
+      });
+    } finally {
+      setIsBulkLoading(false);
+    }
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedLeads(paginated.map((l: any) => l._id));
+    } else {
+      setSelectedLeads([]);
+    }
+  };
+
+  const countries = ["United States", "United Kingdom", "Canada", "Australia", "India", "Germany", "France", "Japan", "China", "Brazil"];
+  const languages = LANGUAGE_NAMES;
+
+  // Every connected Meta form (same source as the Meta Ads dialog) — shown
+  // as soon as a Page is connected, even before any leads are imported from
+  // it — unioned with any distinct form a lead already carries, so a form
+  // that's since been renamed/disconnected from Meta still keeps its tab for
+  // leads that were already imported from it.
+  const adFormTabs = useMemo(() => {
+    const forms = new Map<string, string>();
+    for (const conn of metaIntegrationData?.connections || []) {
+      for (const f of conn.forms || []) {
+        forms.set(f.form_id, f.name || "Untitled Form");
+      }
+    }
+    for (const l of leads) {
+      if (l.meta_form_id && !forms.has(l.meta_form_id)) {
+        forms.set(l.meta_form_id, l.meta_form_name || "Untitled Form");
+      }
+    }
+    return Array.from(forms.entries()).map(([id, name]) => ({ id, name }));
+  }, [metaIntegrationData, leads]);
+
+  // "custom" compares against local-day boundaries so the picked from/to
+  // dates are inclusive regardless of what time of day the lead was created.
+  const matchesDateFilter = (createdAt: string) => {
+    if (dateFilter === "all") return true;
+    if (!createdAt) return false;
+    const d = new Date(createdAt);
+    if (isNaN(d.getTime())) return false;
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    switch (dateFilter) {
+      case "today":
+        return d >= startOfToday;
+      case "yesterday": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - 1);
+        return d >= start && d < startOfToday;
+      }
+      case "this_week": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - start.getDay());
+        return d >= start;
+      }
+      case "this_month":
+        return d >= new Date(now.getFullYear(), now.getMonth(), 1);
+      case "last_7_days": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - 6);
+        return d >= start;
+      }
+      case "last_30_days": {
+        const start = new Date(startOfToday);
+        start.setDate(start.getDate() - 29);
+        return d >= start;
+      }
+      case "custom": {
+        if (customDateFrom && d < new Date(`${customDateFrom}T00:00:00`)) return false;
+        if (customDateTo && d > new Date(`${customDateTo}T23:59:59.999`)) return false;
+        return true;
+      }
+      default:
+        return true;
+    }
+  };
+
+  // Only needed in "all" mode: the server already applies this exact
+  // search/status/metaForm/date filtering when paginated, so `leads` there
+  // is already the correct (current-page) result.
+  const filterLeadsClientSide = (rows: any[], q: string) => {
+    return rows
+      .filter((l) => {
+        const lStatusId = typeof l.status === 'object' ? l.status?._id : l.status;
+        const lStatusName = (typeof l.status === 'object' ? l.status?.name : statuses.find(s => s._id === l.status)?.name) || "";
+        const lSourceName = (typeof l.source === 'object' ? l.source?.name : sources.find((s: any) => s._id === l.source)?.name) || "";
+        const assignedObj = typeof l.assigned === 'object' ? l.assigned : staff.find((s: any) => s._id === l.assigned);
+        const lAssignedName = assignedObj ? `${assignedObj.firstname || ""} ${assignedObj.lastname || ""}` : "";
+
+        // Covers every field the table can show a lead by, not just name/company/email.
+        const matchSearch =
+          !q ||
+          (l.name || "").toLowerCase().includes(q) ||
+          (l.company || "").toLowerCase().includes(q) ||
+          (l.email || "").toLowerCase().includes(q) ||
+          (l.phonenumber || "").toLowerCase().includes(q) ||
+          (l.tags || "").toLowerCase().includes(q) ||
+          String(l.lead_value ?? "").toLowerCase().includes(q) ||
+          (l.salesPerson || "").toLowerCase().includes(q) ||
+          (l.branch || "").toLowerCase().includes(q) ||
+          lStatusName.toLowerCase().includes(q) ||
+          lSourceName.toLowerCase().includes(q) ||
+          lAssignedName.toLowerCase().includes(q);
+
+        const dbName = lStatusName.toLowerCase().replace(" lead", "").replace(" leads", "").trim();
+        const filterVal = statusFilter.toLowerCase();
+
+        const matchStatus = statusFilter === "all" ||
+                            lStatusId === statusFilter ||
+                            dbName === filterVal ||
+                            dbName.includes(filterVal);
+        const matchMetaForm = metaFormFilter === "all" || l.meta_form_id === metaFormFilter;
+        const matchDate = matchesDateFilter(l.createdAt);
+
+        const lSourceId = typeof l.source === "object" ? l.source?._id : l.source;
+        const lAssignedId = typeof l.assigned === "object" ? l.assigned?._id : l.assigned;
+        const matchSource = sourceFilter === "all" || lSourceId === sourceFilter;
+        const matchAssigned =
+          assignedFilter === "all" || (assignedFilter === "unassigned" ? !lAssignedId : lAssignedId === assignedFilter);
+        const matchCampaign = !debouncedCampaign || (l.campaign || "") === debouncedCampaign;
+        const matchWhatsApp = !whatsappOnly || isWhatsAppLead(l);
+        const matchConverted =
+          convertedFilter === "all" || (convertedFilter === "yes" ? !!l.converted : !l.converted);
+        const matchReminder =
+          reminderFilter === "all" ||
+          (reminderFilter === "none" ? !l.pending_reminders : l.reminder_bucket === reminderFilter);
+
+        return matchSearch && matchStatus && matchMetaForm && matchDate &&
+          matchSource && matchAssigned && matchCampaign && matchWhatsApp && matchConverted && matchReminder;
+      })
+      // Newest leads first by default.
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  };
+
+  const filtered = useMemo(() => {
+    if (itemsPerPage !== "all") return leads;
+    return filterLeadsClientSide(leads, debouncedSearch.toLowerCase());
+  }, [leads, debouncedSearch, statusFilter, metaFormFilter, dateFilter, customDateFrom, customDateTo, statuses, itemsPerPage, sourceFilter, assignedFilter, debouncedCampaign, whatsappOnly, convertedFilter, reminderFilter]);
+
+  const paginated = filtered;
+  const totalPages = itemsPerPage === "all" ? 1 : (leadsResult?.pages ?? 1);
+  const totalLeadsCount = itemsPerPage === "all" ? filtered.length : (leadsResult?.total ?? 0);
+  const itemsPerPageNum = itemsPerPage === "all" ? Math.max(totalLeadsCount, 1) : itemsPerPage;
+
+  // EngitechExpo-only: a small "has notes" icon next to the lead's name in
+  // the table, driven by a per-tenant Setting (name: "leadsNoteIndicator")
+  // rather than a hardcoded tenant check — off (and no extra request) for
+  // every other tenant, on for whichever tenant(s) that Setting is enabled for.
+  const showLeadNoteIndicator = !!getSetting("leadsNoteIndicator", false);
+  const paginatedLeadIds = useMemo(() => paginated.map((l: any) => l._id), [paginated]);
+  const { data: leadIdsWithNotes = [] } = useQuery<string[]>({
+    queryKey: ["lead-note-indicator", paginatedLeadIds],
+    queryFn: () => noteService.getRelIdsWithNotes(paginatedLeadIds, "lead"),
+    enabled: showLeadNoteIndicator && paginatedLeadIds.length > 0,
+    staleTime: 30 * 1000,
+  });
+  const leadIdsWithNotesSet = useMemo(() => new Set(leadIdsWithNotes), [leadIdsWithNotes]);
+
+  // Table column config: order + visibility, per-user (browser-local, keyed by account id).
+  const leadColumnDefs = useMemo(() => {
+    const cols: Array<{
+      id: string;
+      label: string;
+      thClassName?: string;
+      tdClassName?: string;
+      tdOnClick?: (e: React.MouseEvent) => void;
+      cell: (l: any) => React.ReactNode;
+    }> = [
+      {
+        id: "name",
+        label: "Name",
+        thClassName: "min-w-[200px]",
+        cell: (l) => (
+          <div className="flex items-center gap-2">
+            <div className="h-8 w-8 rounded-xl bg-slate-100 flex items-center justify-center text-primary font-black text-[10px] uppercase shadow-inner">
+              {l.name?.charAt(0) || "L"}
+            </div>
+            <div className="flex flex-col">
+              <span className="flex items-center gap-1.5 font-black text-slate-900 group-hover:text-primary transition-colors cursor-pointer text-xs">
+                {l.name}
+                {showLeadNoteIndicator && leadIdsWithNotesSet.has(l._id) && (
+                  <button
+                    type="button"
+                    title="View notes"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openModal("view", l, "notes");
+                    }}
+                    className="shrink-0"
+                  >
+                    <StickyNote className="h-3 w-3 text-amber-500 hover:text-amber-600" aria-label="Has notes" />
+                  </button>
+                )}
+              </span>
+              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">{l.position || "Lead"}</span>
+            </div>
+          </div>
+        ),
+      },
+      {
+        id: "company",
+        label: "Company",
+        cell: (l) => l.company || "-",
+      },
+      {
+        id: "email",
+        label: "Email",
+        cell: (l) => (
+          <div className="flex items-center gap-1.5 group/email cursor-pointer">
+            <Mail className="h-3 w-3 text-slate-300 group-hover/email:text-primary transition-colors" />
+            <span className="group-hover/email:text-primary transition-colors">{l.email}</span>
+          </div>
+        ),
+      },
+      {
+        id: "phone",
+        label: "Phone",
+        cell: (l) => (l.phonenumber ? <WhatsAppQuickChat phone={l.phonenumber} data={{ customer_name: l.name, lead_id: l._id }} /> : "-"),
+      },
+      {
+        id: "value",
+        label: "Value",
+        cell: (l) => <span className="font-bold">{formatAmount(l.lead_value || 0)}</span>,
+      },
+      {
+        id: "tags",
+        label: "Tags",
+        cell: (l) => (
+          <div className="flex flex-wrap gap-1">
+            {l.tags ? l.tags.split(",").map((t: string) => (
+              <Badge key={t} className="bg-slate-50 text-slate-500 border-none rounded-md text-[8px] font-black uppercase px-1.5 h-4 tracking-tight">{t.trim()}</Badge>
+            )) : "-"}
+          </div>
+        ),
+      },
+      {
+        id: "assigned",
+        label: "Assigned",
+        cell: (l) => {
+          if (!l.assigned) {
+            return (
+              <div className="flex items-center gap-1.5">
+                <div className="h-5 w-5 rounded-md bg-slate-50 flex items-center justify-center"><User className="h-2.5 w-2.5 text-slate-400" /></div>
+                <span className="text-[10px] font-bold text-slate-400">Unassigned</span>
+              </div>
+            );
+          }
+          const assignedObj = typeof l.assigned === 'object' ? l.assigned : staff.find(s => s._id === l.assigned);
+          if (assignedObj) {
+            return (
+              <div className="flex items-center gap-1.5 group/assigned cursor-pointer">
+                <div className="h-5 w-5 rounded-md bg-primary/10 flex items-center justify-center group-hover/assigned:bg-primary/20 transition-colors">
+                  <User className="h-2.5 w-2.5 text-primary" />
+                </div>
+                <span className="text-[10px] font-bold text-slate-700 group-hover/assigned:text-primary transition-colors">
+                  {assignedObj.firstname} {assignedObj.lastname}
+                </span>
+              </div>
+            );
+          }
+          return (
+            <div className="flex items-center gap-1.5">
+              <div className="h-5 w-5 rounded-md bg-slate-50 flex items-center justify-center"><User className="h-2.5 w-2.5 text-slate-400" /></div>
+              <span className="text-[10px] font-bold text-slate-400">Unknown</span>
+            </div>
+          );
+        },
+      },
+      ...(isPilot ? [{
+        id: "salesPerson",
+        label: "Sales Person",
+        cell: (l: any) => l.salesPerson || "-",
+      }] : []),
+      ...(canUseBranch ? [{
+        id: "branch",
+        label: "Branch",
+        cell: (l: any) => (typeof l.branch === "object" ? (l.branch?.name || "-") : (l.branch || "-")),
+      }] : []),
+      {
+        id: "status",
+        label: "Status",
+        tdOnClick: (e) => e.stopPropagation(),
+        cell: (l) => (
+          <Select
+            value={typeof l.status === 'object' ? (l.status?._id || "") : (l.status || "")}
+            onValueChange={(value) => updateLeadStatusMutation.mutate({ id: l._id, status: value })}
+          >
+            <SelectTrigger className="h-7 w-auto min-w-[110px] rounded-lg border-none font-black text-[8px] uppercase tracking-wider px-2 bg-blue-50 text-blue-500 focus:ring-0 focus:ring-offset-0 gap-1">
+              <SelectValue placeholder="Pending" />
+            </SelectTrigger>
+            <SelectContent>
+              {statuses.map((s: any) => (
+                <SelectItem key={s._id} value={s._id} className="text-xs font-bold">{s.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ),
+      },
+      {
+        id: "source",
+        label: "Source",
+        cell: (l) => {
+          const name = typeof l.source === 'object' ? l.source?.name : (sources.find((s) => s._id === l.source)?.name || "-");
+          if (!isWhatsAppLead(l)) return name;
+          return (
+            <span className="inline-flex items-center gap-1 rounded-md bg-green-50 text-green-700 px-1.5 py-0.5 normal-case" title={l.whatsapp_last_message || undefined}>
+              <MessageCircle className="h-3 w-3" /> {name || "WhatsApp"}
+              {l.whatsapp_message_count > 1 && <span className="text-green-500">· {l.whatsapp_message_count}</span>}
+            </span>
+          );
+        },
+      },
+      {
+        id: "campaign",
+        label: "Campaign",
+        cell: (l) => l.campaign || l.meta_form_name || "-",
+      },
+      {
+        id: "followup",
+        label: "Follow-Up",
+        tdOnClick: (e) => e.stopPropagation(),
+        cell: (l) => {
+          const next = l.next_reminder;
+          if (!hasFollowups || !next) return l.followup_date ? formatDate(l.followup_date) : "-";
+          const tone =
+            l.reminder_bucket === "overdue" || (l.reminder_bucket === "today" && new Date(next.date).getTime() < Date.now())
+              ? "bg-red-50 text-red-600"
+              : l.reminder_bucket === "today"
+                ? "bg-amber-50 text-amber-700"
+                : "bg-blue-50 text-blue-600";
+          return (
+            <button
+              type="button"
+              onClick={() => openModal("view", l, "reminders")}
+              title={next.description}
+              className={cn("inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 whitespace-nowrap", tone)}
+            >
+              <Bell className="h-3 w-3" />
+              {formatDateTime(next.date)}
+              {l.pending_reminders > 1 && <span className="opacity-70">+{l.pending_reminders - 1}</span>}
+            </button>
+          );
+        },
+      },
+      ...(!hasConversion ? [] : [{
+        id: "conversion",
+        label: "Conversion",
+        cell: (l) =>
+          l.converted ? (
+            <Badge className="bg-emerald-50 text-emerald-700 border-none rounded-md text-[8px] font-black uppercase px-1.5 h-5 tracking-tight" title={l.conversion?.treatment_name}>
+              Converted{l.conversion?.converted_at ? ` · ${formatDate(l.conversion.converted_at)}` : ""}
+            </Badge>
+          ) : (
+            <span className="text-[10px] font-bold text-slate-300">Not converted</span>
+          ),
+      },
+      {
+        id: "treatmentValue",
+        label: "Treatment Value",
+        cell: (l) =>
+          l.conversion ? (
+            <span className="font-bold" title={l.conversion.treatment_name}>{formatAmount(Number(l.conversion.treatment_amount) || 0)}</span>
+          ) : (
+            "-"
+          ),
+      }]),
+      {
+        id: "lastContact",
+        label: "Last Contact",
+        cell: (l) => (l.lastcontact ? formatDateTime(l.lastcontact) : "Never"),
+      },
+      {
+        id: "created",
+        label: "Created",
+        cell: (l) => formatDate(l.createdAt),
+      },
+    ];
+    return cols;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPilot, canUseBranch, staff, statuses, sources, updateLeadStatusMutation, formatAmount, showLeadNoteIndicator, leadIdsWithNotesSet, hasConversion, hasFollowups]);
+
+  const customFieldColumnDefs = useMemo(
+    () => tableCustomFields.map((cf: any) => ({
+      id: `cf_${cf._id}`,
+      label: cf.name,
+      tdClassName: "",
+      cell: (l: any) => l.custom_fields?.[cf.slug] ?? "-",
+    })),
+    [tableCustomFields]
+  );
+
+  const allLeadColumns = useMemo(
+    () => [...leadColumnDefs, ...customFieldColumnDefs],
+    [leadColumnDefs, customFieldColumnDefs]
+  );
+
+  // Custom-field columns are excluded from the "default" order on purpose — they always load
+  // asynchronously, so pinning them here would make "Reset" depend on load timing. They still
+  // show (appended at the end) via the fallback logic in orderedLeadColumns below.
+  const DEFAULT_LEAD_COLUMN_ORDER = useMemo(() => leadColumnDefs.map((c) => c.id), [leadColumnDefs]);
+  const leadColumnSettingsKey = user?._id ? `leads_columns_v1_${user._id}` : null;
+  const [columnOrder, setColumnOrder] = useState<string[]>(DEFAULT_LEAD_COLUMN_ORDER);
+  const [hiddenColumns, setHiddenColumns] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!leadColumnSettingsKey) return;
+    try {
+      const raw = window.localStorage.getItem(leadColumnSettingsKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.order)) setColumnOrder(parsed.order);
+        if (Array.isArray(parsed?.hidden)) setHiddenColumns(parsed.hidden);
+      }
+    } catch {
+      // ignore malformed local storage value
+    }
+  }, [leadColumnSettingsKey]);
+
+  useEffect(() => {
+    if (!leadColumnSettingsKey) return;
+    window.localStorage.setItem(leadColumnSettingsKey, JSON.stringify({ order: columnOrder, hidden: hiddenColumns }));
+  }, [leadColumnSettingsKey, columnOrder, hiddenColumns]);
+
+  // All defined columns (incl. hidden ones), in the user's chosen order — newly-added columns
+  // (e.g. a custom field just enabled for the table) are appended at the end automatically.
+  const orderedLeadColumns = useMemo(() => {
+    const byId = new Map(allLeadColumns.map((c) => [c.id, c]));
+    const seen = new Set<string>();
+    const ordered: typeof allLeadColumns = [];
+    for (const id of columnOrder) {
+      const col = byId.get(id);
+      if (col && !seen.has(id)) {
+        ordered.push(col);
+        seen.add(id);
+      }
+    }
+    for (const col of allLeadColumns) {
+      if (!seen.has(col.id)) {
+        ordered.push(col);
+        seen.add(col.id);
+      }
+    }
+    return ordered;
+  }, [allLeadColumns, columnOrder]);
+
+  const visibleLeadColumns = useMemo(
+    () => orderedLeadColumns.filter((c) => !hiddenColumns.includes(c.id)),
+    [orderedLeadColumns, hiddenColumns]
+  );
+
+  const toggleLeadColumnVisibility = (id: string) => {
+    setHiddenColumns((prev) => {
+      const isHidden = prev.includes(id);
+      if (!isHidden && visibleLeadColumns.length <= 1) {
+        toast({ title: "At least one column must stay visible", variant: "destructive" });
+        return prev;
+      }
+      return isHidden ? prev.filter((x) => x !== id) : [...prev, id];
+    });
+  };
+
+  const resetLeadColumns = () => {
+    setColumnOrder(DEFAULT_LEAD_COLUMN_ORDER);
+    setHiddenColumns([]);
+  };
+
+  // Export needs the full filtered set, not just the current page — fetched
+  // on demand only when the user actually exports.
+  const loadAllFilteredLeads = async () => {
+    const response = await leadService.getAll({ insights: "1" });
+    const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+    return filterLeadsClientSide(rows, debouncedSearch.toLowerCase());
+  };
+
+  const statusCards = [...statuses]
+    .sort((a: any, b: any) => (a.statusorder ?? 0) - (b.statusorder ?? 0))
+    .map((s: any) => ({ id: s._id, label: s.name, color: s.color || "#757575" }));
+
+  // Full-page skeleton only on the very first load — `keepPreviousData` on the
+  // leads query means `isLoading` stays false on filter/pagination changes
+  // (previous page's rows stay visible while the new page fetches), so this
+  // never flashes over the table while the user is just filtering.
+  const showPageSkeleton = useMinimumLoading(isLoading);
+  if (showPageSkeleton) {
+    return (
+      <DashboardLayout>
+        <AdminTablePageSkeleton />
+      </DashboardLayout>
+    );
+  }
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6 pb-20">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-black text-slate-900 tracking-tight">Leads</h1>
+            <p className="text-sm font-bold text-slate-400 uppercase tracking-widest mt-1">Management Pipeline</p>
+          </div>
+          <div className="flex gap-2 items-center">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-11 w-11 rounded-xl border-slate-200"
+                  onClick={() => setSearchParams(prev => {
+                    const next = new URLSearchParams(prev);
+                    next.set("view", view === "kanban" ? "list" : "kanban");
+                    return next;
+                  })}
+                  aria-label={view === "kanban" ? "Switch to List view" : "Switch to Kanban view"}
+                >
+                  {view === "kanban" ? <List className="h-4 w-4" /> : <KanbanSquare className="h-4 w-4" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{view === "kanban" ? "Switch to List view" : "Switch to Kanban view"}</TooltipContent>
+            </Tooltip>
+          {can("Leads", "Create") && (
+            <div className="flex flex-wrap gap-2 items-center">
+              <MetaAdsDialog />
+              {/* Temporarily hidden — uncomment to bring the "Website Forms" button back. */}
+              {/* <WebsiteFormsDialog /> */}
+              <ImportButton onData={processLeadRows} loading={importLeadsMutation.isPending} label="Import Leads" />
+              <Dialog open={isNewLeadOpen} onOpenChange={(open) => open ? setIsNewLeadOpen(true) : closeLeadModal()}>
+                  <Button onClick={() => openModal("create")} className="rounded-xl font-black gap-2 shadow-lg shadow-primary/20 px-6 h-11 uppercase text-xs tracking-widest transition-all hover:scale-105">
+                    <Plus className="h-4 w-4 stroke-[3]" />
+                    New Lead
+                  </Button>
+              <DialogContent className={cn("p-0 overflow-hidden rounded-[2.5rem] border-none shadow-2xl bg-white", modalMode === "view" ? "max-w-5xl" : ({ "modal-xl": "max-w-5xl", "modal-xxl": "max-w-6xl" } as Record<string, string>)[String(getSetting("leadModalWidth", "modal-lg"))] || "max-w-4xl")}>
+                <div className="bg-white px-8 py-5 flex items-center justify-between border-b border-slate-300 shrink-0">
+                  <DialogTitle className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+                    <div className="h-8 w-8 rounded-xl bg-primary/10 flex items-center justify-center">
+                      {modalMode === "create" ? <Plus className="h-4 w-4 text-primary" /> : modalMode === "edit" ? <Edit className="h-4 w-4 text-primary" /> : <Eye className="h-4 w-4 text-primary" />}
+                    </div>
+                    {modalMode === "create" ? "Add New Lead" : modalMode === "edit" ? "Edit Lead" : "View Lead Details"}
+                  </DialogTitle>
+                </div>
+                <div className="p-8 max-h-[75vh] overflow-y-auto no-scrollbar">
+                  {modalMode === "view" ? (
+                    <LeadDetailDialog lead={selectedLead} customFieldDefs={customFieldDefs} onEditClick={() => openModal("edit", selectedLead)} />
+                  ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {/* Left Column */}
+                    <div className="space-y-6">
+                      {canUseBranch && (
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Branch *</Label>
+                          <Select disabled={modalMode === "view"} value={leadForm.branch || "none"} onValueChange={(v) => setLeadForm(prev => ({ ...prev, branch: v === "none" ? "" : v }))}>
+                            <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                              <SelectValue placeholder="Select Branch" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">Select Branch</SelectItem>
+                              {branches.map((b) => (
+                                <SelectItem key={b._id} value={b.name}>{b.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1 flex justify-between">
+                          Status *
+                          {modalMode !== "view" && (
+                            <button onClick={() => setIsAddingStatus(!isAddingStatus)} className="text-primary hover:text-primary/80 transition-colors">
+                                <Plus className="h-3 w-3" />
+                            </button>
+                          )}
+                        </Label>
+                        {isAddingStatus ? (
+                          <div className="flex gap-2 animate-in slide-in-from-top-2 duration-200">
+                            <Input value={newStatusName} onChange={(e) => setNewStatusName(e.target.value)} placeholder="Status Name" className="h-10 rounded-xl" />
+                            <Button size="sm" onClick={() => createStatusMutation.mutate(newStatusName)} disabled={!newStatusName}>Add</Button>
+                          </div>
+                        ) : (
+                          <Select disabled={modalMode === "view"} value={leadForm.status} onValueChange={(v) => setLeadForm(prev => ({ ...prev, status: v }))}>
+                            <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                              <SelectValue placeholder="Select Status" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {statuses.map((s: any) => <SelectItem key={s._id} value={s._id}>{s.name}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        )}
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1 flex justify-between">
+                          Source *
+                          {modalMode !== "view" && (
+                            <button onClick={() => setIsAddingSource(!isAddingSource)} className="text-primary hover:text-primary/80 transition-colors">
+                                <Plus className="h-3 w-3" />
+                            </button>
+                          )}
+                        </Label>
+                        {isAddingSource ? (
+                          <div className="flex gap-2 animate-in slide-in-from-top-2 duration-200">
+                            <Input value={newSourceName} onChange={(e) => setNewSourceName(e.target.value)} placeholder="Source Name" className="h-10 rounded-xl" />
+                            <Button size="sm" onClick={() => createSourceMutation.mutate(newSourceName)} disabled={!newSourceName}>Add</Button>
+                          </div>
+                        ) : (
+                          <Select disabled={modalMode === "view"} value={leadForm.source} onValueChange={(v) => setLeadForm(prev => ({ ...prev, source: v }))}>
+                            <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                              <SelectValue placeholder="Select Source" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {sources.map((s: any) => <SelectItem key={s._id} value={s._id}>{s.name}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        )}
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Assigned</Label>
+                        <Select disabled={modalMode === "view"} value={leadForm.assigned} onValueChange={(v) => setLeadForm(prev => ({ ...prev, assigned: v }))}>
+                          <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                            <SelectValue placeholder="Select Staff" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {staff.map(s => <SelectItem key={s._id} value={s._id}>{s.firstname} {s.lastname}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {isPilot && (
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Sales Person</Label>
+                          <Select disabled={modalMode === "view"} value={leadForm.salesPerson || "none"} onValueChange={(v) => setLeadForm(prev => ({ ...prev, salesPerson: v === "none" ? "" : v }))}>
+                            <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                              <SelectValue placeholder="Select Sales Person" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">None</SelectItem>
+                              {staff.map(s => {
+                                const name = `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.name || s.email;
+                                return <SelectItem key={s._id || s.id} value={name}>{name}</SelectItem>;
+                              })}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Tags</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.tags} onChange={(e) => setLeadForm(prev => ({ ...prev, tags: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" placeholder="tag1, tag2" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Name *</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.name} onChange={(e) => setLeadForm(prev => ({ ...prev, name: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Position</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.position} onChange={(e) => setLeadForm(prev => ({ ...prev, position: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Email Address</Label>
+                        <Input readOnly={modalMode === "view"} type="email" value={leadForm.email} onChange={(e) => setLeadForm(prev => ({ ...prev, email: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Website</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.website} onChange={(e) => setLeadForm(prev => ({ ...prev, website: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Phone</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.phonenumber} onChange={(e) => setLeadForm(prev => ({ ...prev, phonenumber: e.target.value.replace(/\D/g, "").slice(0, 10) }))} maxLength={10} inputMode="numeric" className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+                    </div>
+
+                    {/* Right Column */}
+                    <div className="space-y-6">
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Lead value {symbol}</Label>
+                        <Input readOnly={modalMode === "view"} type="number" value={leadForm.lead_value} onChange={(e) => setLeadForm(prev => ({ ...prev, lead_value: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Company</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.company} onChange={(e) => setLeadForm(prev => ({ ...prev, company: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Address</Label>
+                        <Input readOnly={modalMode === "view"} value={leadForm.address} onChange={(e) => setLeadForm(prev => ({ ...prev, address: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">City</Label>
+                          <Input readOnly={modalMode === "view"} value={leadForm.city} onChange={(e) => setLeadForm(prev => ({ ...prev, city: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">State</Label>
+                          <Input readOnly={modalMode === "view"} value={leadForm.state} onChange={(e) => setLeadForm(prev => ({ ...prev, state: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Country</Label>
+                          <Select disabled={modalMode === "view"} value={leadForm.country} onValueChange={(v) => setLeadForm(prev => ({ ...prev, country: v }))}>
+                            <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                              <SelectValue placeholder="Select Country" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {countries.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Zip Code</Label>
+                          <Input readOnly={modalMode === "view"} value={leadForm.zip} onChange={(e) => setLeadForm(prev => ({ ...prev, zip: e.target.value }))} className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white" />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Default Language</Label>
+                        <Select disabled={modalMode === "view"} value={leadForm.default_language} onValueChange={(v) => setLeadForm(prev => ({ ...prev, default_language: v }))}>
+                          <SelectTrigger className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {languages.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Description</Label>
+                        <Textarea readOnly={modalMode === "view"} value={leadForm.description} onChange={(e) => setLeadForm(prev => ({ ...prev, description: e.target.value }))} className="rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white min-h-[100px]" />
+                      </div>
+
+                      {selectedLead && customFieldDefs.length > 0 && (
+                        <div className="space-y-2">
+                          <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">
+                            Custom Fields
+                          </Label>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {customFieldDefs.map((cf: any) => (
+                              <div key={cf._id} className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{cf.name}</p>
+                                <p className="text-xs font-bold text-slate-800 mt-0.5">
+                                  {selectedLead.custom_fields?.[cf.slug] ?? "-"}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black uppercase tracking-widest text-slate-700 ml-1">Follow-Up Date</Label>
+                        <Input
+                          type="date"
+                          readOnly={modalMode === "view"}
+                          value={leadForm.followup_date}
+                          onChange={(e) => setLeadForm(prev => ({ ...prev, followup_date: e.target.value }))}
+                          className="h-11 rounded-xl bg-slate-50/50 border-slate-300 px-4 text-slate-950 font-bold transition-all focus:bg-white"
+                        />
+                      </div>
+
+                      <div className="flex gap-6">
+                        <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-300 flex-1">
+                          <Checkbox disabled={modalMode === "view"} id="is_public" checked={leadForm.is_public} onCheckedChange={(c) => setLeadForm(prev => ({ ...prev, is_public: !!c }))} />
+                          <Label htmlFor="is_public" className="font-black text-xs uppercase tracking-widest text-slate-600 cursor-pointer">Public</Label>
+                        </div>
+                        <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-300 flex-1">
+                          <Checkbox disabled={modalMode === "view"} id="contacted_today" checked={leadForm.contacted_today} onCheckedChange={(c) => setLeadForm(prev => ({ ...prev, contacted_today: !!c }))} />
+                          <Label htmlFor="contacted_today" className="font-black text-xs uppercase tracking-widest text-slate-600 cursor-pointer">Contacted Today</Label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  )}
+
+                  {/* Footer buttons moved inside the scrollable area to prevent cutoff */}
+                  <div className="mt-8 flex items-center justify-between gap-3 pt-6 border-t border-slate-100">
+                    <DialogClose asChild>
+                      <Button variant="ghost" className="h-9 rounded-xl px-6 font-black uppercase text-[10px] tracking-widest text-slate-500 hover:bg-slate-200 transition-all">Close</Button>
+                    </DialogClose>
+
+                    <div className="flex items-center gap-2">
+                      {/* View-mode action buttons — guard on modalMode only; null-check lead inside handlers */}
+                      {modalMode === "view" && (
+                        <>
+                          {/* More dropdown */}
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="outline"
+                                className="h-9 rounded-xl px-4 font-black uppercase text-[10px] tracking-widest border-slate-200 hover:bg-slate-50 gap-1.5"
+                              >
+                                More <ChevronDown className="h-3 w-3" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-44 rounded-2xl p-2 border-slate-100 shadow-2xl">
+                              <DropdownMenuItem
+                                className="rounded-xl h-10 font-bold text-xs cursor-pointer text-amber-600 hover:bg-amber-50 focus:bg-amber-50 focus:text-amber-700 gap-2"
+                                onClick={() => {
+                                  if (!selectedLead) return;
+                                  if (window.confirm("Mark this lead as lost?")) {
+                                    markAsLostMutation.mutate(selectedLead._id);
+                                  }
+                                }}
+                                disabled={markAsLostMutation.isPending}
+                              >
+                                <AlertTriangle className="h-4 w-4" />
+                                Mark as lost
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                className="rounded-xl h-10 font-bold text-xs cursor-pointer text-slate-500 hover:bg-slate-50 focus:bg-slate-50 gap-2"
+                                onClick={() => {
+                                  if (!selectedLead) return;
+                                  if (window.confirm("Mark this lead as junk?")) {
+                                    markAsJunkMutation.mutate(selectedLead._id);
+                                  }
+                                }}
+                                disabled={markAsJunkMutation.isPending}
+                              >
+                                <AlertOctagon className="h-4 w-4" />
+                                Mark as junk
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                className="rounded-xl h-10 font-bold text-xs cursor-pointer text-red-600 hover:bg-red-50 focus:bg-red-50 focus:text-red-700 gap-2"
+                                onClick={() => {
+                                  if (!selectedLead) return;
+                                  if (window.confirm("Delete this lead? This cannot be undone.")) {
+                                    deleteLeadMutation.mutate(selectedLead._id);
+                                    closeLeadModal();
+                                  }
+                                }}
+                                disabled={deleteLeadMutation.isPending}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                                Delete Lead
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+
+                          {/* Convert to Patient */}
+                          {selectedLead?.converted ? (
+                            <Badge className="h-9 rounded-xl px-4 font-black uppercase text-[10px] tracking-widest bg-emerald-50 text-emerald-700 border border-emerald-200 gap-2">
+                              <UserCheck className="h-4 w-4" /> Converted
+                            </Badge>
+                          ) : can("Leads", "Edit") && (
+                            <Button
+                              onClick={() => {
+                                if (!selectedLead) return;
+                                if (hasConversion) {
+                                  setConvertLead(selectedLead);
+                                } else if (window.confirm(`Convert "${selectedLead.name}" to a customer? A new customer record will be created.`)) {
+                                  legacyConvertMutation.mutate(selectedLead._id);
+                                }
+                              }}
+                              disabled={legacyConvertMutation.isPending}
+                              className="h-9 rounded-xl px-5 font-black uppercase text-[10px] tracking-widest bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg shadow-emerald-500/20 transition-all hover:scale-105 gap-2"
+                            >
+                              <UserCheck className="h-4 w-4" />
+                              {hasConversion ? "Convert to Patient" : legacyConvertMutation.isPending ? "Converting..." : "Convert to Customer"}
+                            </Button>
+                          )}
+                        </>
+                      )}
+
+                      {/* Create / Edit save button */}
+                      {modalMode !== "view" && (
+                        <Button onClick={handleSaveLead} disabled={createLeadMutation.isPending || updateLeadMutation.isPending} className="h-9 rounded-xl px-6 font-black uppercase text-[10px] tracking-widest shadow-lg shadow-primary/20 transition-all hover:scale-105">
+                          {createLeadMutation.isPending || updateLeadMutation.isPending ? "Saving..." : modalMode === "create" ? "Save Lead" : "Update Lead"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+            </div>
+          )}
+          </div>
+        </div>
+
+        {/* CRM overview — every figure is computed server-side (/leads/overview) */}
+        {leadFeatures.any && (
+        <LeadsOverview
+          active={{
+            whatsapp: whatsappOnly,
+            converted: convertedFilter === "yes",
+            confirmed: !!confirmedStatusId && statusFilter === confirmedStatusId,
+            reminder: reminderFilter,
+          }}
+          onShowAll={() => {
+            clearAdvancedFilters();
+            setStatusFilter("all");
+          }}
+          onToggleWhatsApp={() => setWhatsappOnly((v) => !v)}
+          onToggleConfirmed={() => {
+            if (!confirmedStatusId) {
+              SonnerToast.info("No \"Confirmed\" status exists yet — add it under Setup → Leads → Statuses.");
+              return;
+            }
+            setStatusFilter((prev) => (prev === confirmedStatusId ? "all" : confirmedStatusId));
+          }}
+          onToggleConverted={() => setConvertedFilter((v) => (v === "yes" ? "all" : "yes"))}
+          onOpenFollowUps={(bucket) => {
+            setFollowUpsBucket(bucket);
+            setFollowUpsOpen(true);
+          }}
+          onManageSpend={() => setSpendOpen(true)}
+        />
+        )}
+
+        {/* Ads-wise view — only shows once at least one lead has been imported from a Meta form */}
+        {adFormTabs.length > 0 && (
+          <Tabs value={metaFormFilter} onValueChange={setMetaFormFilter}>
+            <div className="overflow-x-auto no-scrollbar w-full">
+            <TabsList className="flex w-max h-auto min-w-full">
+              <TabsTrigger value="all" className="shrink-0 whitespace-nowrap">All Leads</TabsTrigger>
+              {adFormTabs.map((form) => (
+                <TabsTrigger key={form.id} value={form.id} className="shrink-0 whitespace-nowrap">{form.name}</TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
+          </Tabs>
+        )}
+
+        {/* Status Cards - Filters */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
+          {statusCards.map((card) => {
+            const count = leadsResult?.statusCounts?.[String(card.id)] ?? 0;
+            const isActive = statusFilter === card.id;
+
+            return (
+              <button
+                key={card.id}
+                onClick={() => setStatusFilter(isActive ? "all" : card.id)}
+                className={cn(
+                  "flex flex-col p-3.5 rounded-2xl transition-all duration-300 text-left group border-2",
+                  isActive ? "border-primary bg-primary/5 ring-4 ring-primary/5" : "border-transparent bg-white hover:border-slate-100 shadow-sm"
+                )}
+              >
+                <div className="flex flex-col">
+                  <p className="text-[9px] font-black uppercase tracking-tight text-slate-400 group-hover:text-slate-600 truncate">{card.label}</p>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <p className="text-sm font-black" style={{ color: card.color }}>{count}</p>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        {view === "kanban" ? (
+          <LeadsKanban leads={filtered} statuses={statuses} staff={staff} isLoading={isLoading} />
+        ) : (
+        <Card className="border shadow-sm rounded-lg overflow-hidden bg-card">
+          <CardContent className="p-0">
+            {/* Table Controls */}
+            <div className="p-4 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center justify-between gap-6 bg-slate-50/30">
+              <div className="flex flex-wrap items-center gap-4">
+                <Select value={itemsPerPage.toString()} onValueChange={(v) => { setItemsPerPage(v === "all" ? "all" : parseInt(v)); setCurrentPage(1); }}>
+                  <SelectTrigger className="w-[80px] h-10 bg-white border-slate-200 rounded-xl font-bold text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10</SelectItem>
+                    <SelectItem value="25">25</SelectItem>
+                    <SelectItem value="50">50</SelectItem>
+                    <SelectItem value="100">100</SelectItem>
+                    <SelectItem value="all">All</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <ExportButton
+                  data={loadAllFilteredLeads}
+                  filename="leads"
+                  columns={[
+                    { header: "Name", key: "name" },
+                    { header: "Email", key: "email" },
+                    { header: "Company", key: "company" },
+                    { header: "Phone", key: "phonenumber" },
+                    { header: "Status", key: (l) => typeof l.status === "object" ? l.status?.name : (statuses.find((s) => s._id === l.status)?.name || "") },
+                    { header: "Source", key: (l) => typeof l.source === "object" ? l.source?.name : (sources.find((s) => s._id === l.source)?.name || "") },
+                    { header: "Lead Value", key: "lead_value" },
+                    { header: "Address", key: "address" },
+                    { header: "City", key: "city" },
+                    { header: "State", key: "state" },
+                    { header: "Country", key: "country" },
+                    { header: "Zip", key: "zip" },
+                    { header: "Website", key: "website" },
+                    { header: "Campaign", key: (l) => l.campaign || l.meta_form_name || "" },
+                    { header: "WhatsApp Lead", key: (l) => (isWhatsAppLead(l) ? "Yes" : "No") },
+                    { header: "Next Follow-up", key: (l) => (l.next_reminder?.date ? formatDateTime(l.next_reminder.date) : "") },
+                    { header: "Converted", key: (l) => (l.converted ? "Yes" : "No") },
+                    { header: "Treatment", key: (l) => l.conversion?.treatment_name || "" },
+                    { header: "Treatment Amount", key: (l) => l.conversion?.treatment_amount ?? "" },
+                    { header: "Created At", key: (l) => l.createdAt ? new Date(l.createdAt).toLocaleDateString() : "" },
+                    ...(isPilot ? [
+                      { header: "Sales Person", key: (l: any) => l.salesPerson || "" },
+                    ] : []),
+                    ...(canUseBranch ? [
+                      { header: "Branch", key: (l: any) => typeof l.branch === "object" ? (l.branch?.name || "") : (l.branch || "") },
+                    ] : []),
+                  ]}
+                />
+                <LeadColumnSettings
+                  columns={orderedLeadColumns.map((c) => ({ id: c.id, label: c.label }))}
+                  hiddenColumns={hiddenColumns}
+                  onReorder={setColumnOrder}
+                  onToggle={toggleLeadColumnVisibility}
+                  onReset={resetLeadColumns}
+                />
+                <MetaFormsFilterDropdown forms={adFormTabs} value={metaFormFilter} onChange={setMetaFormFilter} />
+
+                {/* Bulk Actions Modal */}
+                <Dialog open={bulkActionOpen} onOpenChange={(open) => {
+                  // clear unsaved bulk choices on open/close
+                  setBulkState({ massDelete: false, convertToCustomer: false, status: "", source: "", assigned: "", salesPerson: "", tags: "", is_public: false, contacted_today: false, mark_lost: false });
+                  setBulkActionOpen(open);
+                }}>
+                  <DialogTrigger asChild>
+                    <Button 
+                      variant="outline" 
+                      className={cn(
+                        "h-10 rounded-xl px-4 border-slate-200 bg-white font-black uppercase text-[10px] tracking-widest flex items-center gap-2 transition-all",
+                        selectedLeads.length > 0 && "border-primary/50 bg-primary/5 text-primary shadow-sm"
+                      )}
+                    >
+                      <Users className="h-3.5 w-3.5" />
+                      Bulk Actions
+                      {selectedLeads.length > 0 && (
+                        <span className="ml-0.5 px-1.5 py-0.5 rounded-full bg-primary text-white text-[9px] font-black">
+                          {selectedLeads.length}
+                        </span>
+                      )}
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-2xl p-0 overflow-hidden rounded-[2.5rem] border-none shadow-2xl bg-white">
+                    <div className="bg-white px-8 py-6 flex items-center justify-between border-b border-slate-100">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2.5 rounded-xl bg-primary/10 text-primary">
+                          <Users className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <DialogTitle className="text-xl font-black text-slate-900 tracking-tight">
+                            Bulk Lead Management
+                          </DialogTitle>
+                          <p className="text-xs font-semibold text-slate-500 mt-0.5">
+                            {selectedLeads.length > 0
+                              ? `${selectedLeads.length} lead(s) selected for bulk operation`
+                              : "Select leads from the table to apply bulk changes"}
+                          </p>
+                        </div>
+                      </div>
+                      {selectedLeads.length > 0 ? (
+                        <Badge variant="outline" className="px-3 py-1 bg-primary/10 text-primary border-primary/20 font-black text-xs rounded-lg">
+                          {selectedLeads.length} SELECTED
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline" className="px-3 py-1 bg-amber-50 text-amber-600 border-amber-200 font-black text-xs rounded-lg">
+                          0 SELECTED
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="p-8 space-y-6 max-h-[70vh] overflow-y-auto no-scrollbar">
+                      {selectedLeads.length === 0 && (
+                        <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-2xl flex items-center gap-3 text-amber-800 text-xs font-semibold">
+                          <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0" />
+                          <span>Please select one or more leads using the checkboxes in the table first before confirming any bulk action.</span>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 gap-4">
+                        {/* Convert to Customer Option */}
+                        <div className={cn(
+                          "flex items-start gap-3.5 p-4 rounded-2xl border transition-all cursor-pointer",
+                          bulkState.convertToCustomer 
+                            ? "bg-emerald-50 border-emerald-300 ring-2 ring-emerald-500/20 shadow-sm" 
+                            : "bg-emerald-50/40 border-emerald-100 hover:bg-emerald-50/80",
+                          (bulkState.massDelete || bulkState.mark_lost) && "opacity-40 pointer-events-none"
+                        )}
+                        onClick={() => {
+                          if (bulkState.massDelete || bulkState.mark_lost) return;
+                          const nextVal = !bulkState.convertToCustomer;
+                          setBulkState({
+                            ...bulkState,
+                            convertToCustomer: nextVal,
+                            massDelete: false,
+                            mark_lost: false,
+                          });
+                        }}
+                        >
+                          <Checkbox 
+                            id="bulk-convert-customer" 
+                            className="mt-0.5 border-emerald-400 data-[state=checked]:bg-emerald-600 data-[state=checked]:border-emerald-600 h-5 w-5 rounded-md" 
+                            checked={bulkState.convertToCustomer}
+                            onCheckedChange={(c) => {
+                              const checked = !!c;
+                              setBulkState({
+                                ...bulkState,
+                                convertToCustomer: checked,
+                                massDelete: checked ? false : bulkState.massDelete,
+                                mark_lost: checked ? false : bulkState.mark_lost,
+                              });
+                            }}
+                            disabled={bulkState.massDelete || bulkState.mark_lost}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                          <div className="flex flex-col flex-1">
+                            <Label htmlFor="bulk-convert-customer" className="font-black text-xs uppercase tracking-widest text-emerald-800 cursor-pointer flex items-center gap-2">
+                              <UserCheck className="h-4 w-4 text-emerald-600" />
+                              Convert to Customer
+                            </Label>
+                            <span className="text-[11px] font-medium text-emerald-700/90 mt-1 leading-snug">
+                              Selected leads will be converted into customer profiles. All details (Name/Company, Phone, Email, Website, Address, City, State, Zip, Country, Contact Person) will be transferred and status set to Converted.
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className={cn("flex items-center gap-3 p-4 bg-rose-50/50 rounded-2xl border border-rose-100", bulkState.convertToCustomer && "opacity-40 pointer-events-none")}>
+                            <Checkbox 
+                              id="bulk-delete" 
+                              className="border-rose-300 data-[state=checked]:bg-rose-500 data-[state=checked]:border-rose-500" 
+                              checked={bulkState.massDelete}
+                              onCheckedChange={(c) => {
+                                const checked = !!c;
+                                setBulkState({
+                                  ...bulkState, 
+                                  massDelete: checked, 
+                                  convertToCustomer: checked ? false : bulkState.convertToCustomer
+                                });
+                              }}
+                              disabled={bulkState.convertToCustomer}
+                            />
+                            <Label htmlFor="bulk-delete" className="font-black text-xs uppercase tracking-widest text-rose-600 cursor-pointer">Mass Delete</Label>
+                        </div>
+                        <div className={cn("flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                            <Checkbox 
+                              id="bulk-lost" 
+                              checked={bulkState.mark_lost}
+                              onCheckedChange={(c) => setBulkState({...bulkState, mark_lost: !!c})}
+                              disabled={bulkState.massDelete || bulkState.convertToCustomer}
+                            />
+                            <Label htmlFor="bulk-lost" className="font-black text-xs uppercase tracking-widest text-slate-600 cursor-pointer">Mark as lost</Label>
+                        </div>
+                        
+                        <div className={cn("space-y-2", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                            <Label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Change Status</Label>
+                            <Select value={bulkState.status} onValueChange={(v) => setBulkState({...bulkState, status: v})} disabled={bulkState.massDelete || bulkState.convertToCustomer}>
+                                <SelectTrigger className="h-11 rounded-xl border-slate-100 bg-slate-50/50 px-4">
+                                    <SelectValue placeholder="Select Status" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {statuses.map(s => <SelectItem key={s._id} value={s._id}>{s.name}</SelectItem>)}
+                                </SelectContent>
+                            </Select>
+                        </div>
+
+                        <div className={cn("space-y-2", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                            <Label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Lead Source</Label>
+                            <Select value={bulkState.source} onValueChange={(v) => setBulkState({...bulkState, source: v})} disabled={bulkState.massDelete || bulkState.convertToCustomer}>
+                                <SelectTrigger className="h-11 rounded-xl border-slate-100 bg-slate-50/50 px-4"><SelectValue placeholder="Select Source" /></SelectTrigger>
+                                <SelectContent>{sources.map(s => <SelectItem key={s._id} value={s._id}>{s.name}</SelectItem>)}</SelectContent>
+                            </Select>
+                        </div>
+
+                        <div className={cn("space-y-2", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                            <Label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Assigned To</Label>
+                            <Select value={bulkState.assigned} onValueChange={(v) => setBulkState({...bulkState, assigned: v})} disabled={bulkState.massDelete || bulkState.convertToCustomer}>
+                                <SelectTrigger className="h-11 rounded-xl border-slate-100 bg-slate-50/50 px-4"><SelectValue placeholder="Select Staff" /></SelectTrigger>
+                                <SelectContent>
+                                    {staff.map(s => <SelectItem key={s._id} value={s._id}>{s.firstname} {s.lastname}</SelectItem>)}
+                                </SelectContent>
+                            </Select>
+                        </div>
+
+                        {isPilot && (
+                          <div className={cn("space-y-2", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                              <Label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Sales Person</Label>
+                              <Select value={bulkState.salesPerson || "none"} onValueChange={(v) => setBulkState({...bulkState, salesPerson: v === "none" ? "" : v})} disabled={bulkState.massDelete || bulkState.convertToCustomer}>
+                                  <SelectTrigger className="h-11 rounded-xl border-slate-100 bg-slate-50/50 px-4"><SelectValue placeholder="Select Sales Person" /></SelectTrigger>
+                                  <SelectContent>
+                                      <SelectItem value="none">None</SelectItem>
+                                      {staff.map(s => {
+                                        const name = `${s.firstname || ""} ${s.lastname || ""}`.trim() || s.name || s.email;
+                                        return <SelectItem key={s._id || s.id} value={name}>{name}</SelectItem>;
+                                      })}
+                                  </SelectContent>
+                              </Select>
+                          </div>
+                        )}
+
+                        <div className={cn("space-y-2", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                            <Label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Tags</Label>
+                            <Input 
+                              placeholder="Enter tags separated by comma" 
+                              className="h-11 rounded-xl border-slate-100 bg-slate-50/50 px-4" 
+                              value={bulkState.tags}
+                              onChange={(e) => setBulkState({...bulkState, tags: e.target.value})}
+                              disabled={bulkState.massDelete || bulkState.convertToCustomer}
+                            />
+                        </div>
+
+                        <div className={cn("flex items-center gap-6 p-4 bg-blue-50/30 rounded-2xl border border-blue-100", (bulkState.massDelete || bulkState.convertToCustomer) && "opacity-40 pointer-events-none")}>
+                            <div className="flex items-center gap-3">
+                                <Checkbox 
+                                  id="bulk-public" 
+                                  checked={bulkState.is_public}
+                                  onCheckedChange={(c) => setBulkState({...bulkState, is_public: !!c})}
+                                  disabled={bulkState.massDelete || bulkState.convertToCustomer}
+                                />
+                                <Label htmlFor="bulk-public" className="font-black text-xs uppercase tracking-widest text-blue-600">Public</Label>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <Checkbox 
+                                  id="bulk-contacted" 
+                                  checked={bulkState.contacted_today}
+                                  onCheckedChange={(c) => setBulkState({...bulkState, contacted_today: !!c})}
+                                  disabled={bulkState.massDelete || bulkState.convertToCustomer}
+                                />
+                                <Label htmlFor="bulk-contacted" className="font-black text-xs uppercase tracking-widest text-slate-600">Contacted Today</Label>
+                            </div>
+                        </div>
+                      </div>
+
+                      {/* Footer buttons moved inside the scrollable area to prevent cutoff */}
+                      <div className="mt-8 flex justify-end gap-4 pt-6 border-t border-slate-100">
+                        <DialogClose asChild>
+                          <Button variant="ghost" className="h-11 rounded-xl px-8 font-black uppercase text-xs tracking-widest text-slate-500 hover:bg-slate-200 transition-all">Close</Button>
+                        </DialogClose>
+                        <Button 
+                          className="h-11 rounded-xl px-8 font-black uppercase text-xs tracking-widest shadow-xl shadow-primary/20 transition-all hover:scale-105"
+                          onClick={handleBulkAction}
+                          disabled={isBulkLoading || selectedLeads.length === 0}
+                        >
+                          {isBulkLoading ? "Processing..." : "Confirm Action"}
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full lg:w-auto">
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      aria-label="Filter leads by date"
+                      className="h-11 w-11 shrink-0 bg-white border-slate-200 rounded-2xl"
+                    >
+                      <Filter className={cn("h-4 w-4", dateFilter !== "all" ? "text-primary" : "text-slate-400")} />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-64 max-w-[calc(100vw-2rem)] rounded-2xl p-2 space-y-1">
+                    {DATE_FILTER_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setDateFilter(opt.value)}
+                        className={cn(
+                          "w-full text-left rounded-xl px-3 py-2 text-xs font-bold transition-colors",
+                          dateFilter === opt.value ? "bg-primary/10 text-primary" : "text-slate-600 hover:bg-slate-50"
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                    {dateFilter === "custom" && (
+                      <div className="space-y-2 mt-1 pt-2 border-t border-slate-100">
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400 ml-1">From</Label>
+                          <Input
+                            type="date"
+                            className="h-9 w-full text-xs"
+                            value={customDateFrom}
+                            onChange={(e) => setCustomDateFrom(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400 ml-1">To</Label>
+                          <Input
+                            type="date"
+                            className="h-9 w-full text-xs"
+                            value={customDateTo}
+                            onChange={(e) => setCustomDateTo(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </PopoverContent>
+                </Popover>
+
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      aria-label="More lead filters"
+                      className="h-11 shrink-0 bg-white border-slate-200 rounded-2xl gap-2 px-3 text-xs font-black"
+                    >
+                      <SlidersHorizontal className={cn("h-4 w-4", advancedFilterCount ? "text-primary" : "text-slate-400")} />
+                      Filters
+                      {advancedFilterCount > 0 && (
+                        <span className="h-5 min-w-5 px-1 rounded-full bg-primary text-white text-[10px] flex items-center justify-center">{advancedFilterCount}</span>
+                      )}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-80 max-w-[calc(100vw-2rem)] rounded-2xl p-4 space-y-3">
+                    <div className="space-y-1">
+                      <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400">Lead source</Label>
+                      <Select value={sourceFilter} onValueChange={setSourceFilter}>
+                        <SelectTrigger className="h-9 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All sources</SelectItem>
+                          {(sources as any[]).map((s) => <SelectItem key={s._id} value={s._id}>{s.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400">Campaign</Label>
+                      <Input
+                        list="lead-campaign-options"
+                        value={campaignFilter}
+                        onChange={(e) => setCampaignFilter(e.target.value)}
+                        placeholder="Any campaign"
+                        className="h-9 text-xs"
+                      />
+                      <datalist id="lead-campaign-options">
+                        {Array.from(new Set(leads.map((l: any) => l.campaign).filter(Boolean))).map((c: any) => (
+                          <option key={c} value={c} />
+                        ))}
+                      </datalist>
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400">Assigned staff</Label>
+                      <Select value={assignedFilter} onValueChange={setAssignedFilter}>
+                        <SelectTrigger className="h-9 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">Anyone</SelectItem>
+                          <SelectItem value="unassigned">Unassigned</SelectItem>
+                          {(staff as any[]).map((s) => (
+                            <SelectItem key={s._id} value={s._id}>{`${s.firstname || ""} ${s.lastname || ""}`.trim() || s.email}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {hasConversion && (
+                      <div className="space-y-1">
+                        <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400">Conversion</Label>
+                        <Select value={convertedFilter} onValueChange={(v) => setConvertedFilter(v as any)}>
+                          <SelectTrigger className="h-9 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all">All</SelectItem>
+                            <SelectItem value="yes">Converted</SelectItem>
+                            <SelectItem value="no">Not converted</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      )}
+                      {hasFollowups && (
+                      <div className="space-y-1">
+                        <Label className="text-[10px] font-black uppercase tracking-wider text-slate-400">Reminder</Label>
+                        <Select value={reminderFilter} onValueChange={(v) => setReminderFilter(v as any)}>
+                          <SelectTrigger className="h-9 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all">All</SelectItem>
+                            <SelectItem value="today">Due today</SelectItem>
+                            <SelectItem value="overdue">Overdue</SelectItem>
+                            <SelectItem value="upcoming">Upcoming</SelectItem>
+                            <SelectItem value="none">No reminder</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      )}
+                    </div>
+                    {hasWhatsAppLeads && (
+                    <label className="flex items-center gap-2 rounded-xl border border-slate-100 p-2.5 cursor-pointer">
+                      <Checkbox checked={whatsappOnly} onCheckedChange={(v) => setWhatsappOnly(!!v)} />
+                      <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                        <MessageCircle className="h-3.5 w-3.5 text-green-600" /> WhatsApp leads only
+                      </span>
+                    </label>
+                    )}
+                    {advancedFilterCount > 0 && (
+                      <Button variant="ghost" size="sm" onClick={clearAdvancedFilters} className="w-full h-8 text-xs font-bold text-slate-500">
+                        Clear filters
+                      </Button>
+                    )}
+                  </PopoverContent>
+                </Popover>
+
+                <div className="relative w-full lg:w-80">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 stroke-[3]" />
+                  <Input
+                    placeholder="Search leads..."
+                    className="pl-12 h-11 bg-white border-slate-200 rounded-2xl text-xs font-bold transition-all focus:ring-4 focus:ring-primary/5"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <Table className="min-w-[1400px]" wrapperClassName="max-h-[600px] no-scrollbar">
+                <TableHeader className="sticky top-0 z-10 bg-card [&_th]:bg-muted/50">
+                  <TableRow>
+                    <TableHead className="w-12">
+                      <Checkbox className="border-slate-300 rounded-md" checked={selectedLeads.length === paginated.length && paginated.length > 0} onCheckedChange={handleSelectAll} />
+                    </TableHead>
+                    <TableHead className="w-12 text-center">#</TableHead>
+                    {visibleLeadColumns.map((col) => (
+                      <TableHead key={col.id} className={col.thClassName}>{col.label}</TableHead>
+                    ))}
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    Array.from({ length: 5 }).map((_, i) => (
+                      <TableRow key={i}>
+                        <TableCell colSpan={visibleLeadColumns.length + 3}><Skeleton className="h-12 w-full rounded-2xl" /></TableCell>
+                      </TableRow>
+                    ))
+                  ) : paginated.length === 0 ? (
+                    <TableEmpty colSpan={visibleLeadColumns.length + 3}><div className="flex flex-col items-center gap-3"><Users className="h-12 w-12 text-muted-foreground/30" /><p>No leads found in the pipeline</p></div></TableEmpty>
+                  ) : (
+                    paginated.map((l, index) => (
+                      <TableRow
+                        key={l._id}
+                        className={cn(
+                          "group",
+                          selectedLeads.includes(l._id) ? "bg-primary/5" : ""
+                        )}
+                      >
+                        <TableCell>
+                          <Checkbox 
+                            className="border-slate-200 rounded-md" 
+                            checked={selectedLeads.includes(l._id)} 
+                            onCheckedChange={(c) => {
+                              if (c) setSelectedLeads([...selectedLeads, l._id]);
+                              else setSelectedLeads(selectedLeads.filter(id => id !== l._id));
+                            }} 
+                          />
+                        </TableCell>
+                        <TableCell className="text-center text-muted-foreground">{(currentPage - 1) * itemsPerPageNum + index + 1}</TableCell>
+                        {visibleLeadColumns.map((col) => (
+                          <TableCell key={col.id} className={col.tdClassName} onClick={col.tdOnClick}>
+                            {col.cell(l)}
+                          </TableCell>
+                        ))}
+                        <TableCell>
+                           <TableActions
+                             onView={() => openModal("view", l)}
+                             onEdit={() => openModal("edit", l)}
+                             onDelete={() => {
+                               if (window.confirm("Are you sure you want to delete this lead?")) {
+                                 deleteLeadMutation.mutate(l._id);
+                               }
+                             }}
+                           />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+            </Table>
+
+            {!isLoading && (
+              <TablePagination page={currentPage} pageSize={itemsPerPageNum} total={totalLeadsCount} onPageChange={setCurrentPage} />
+            )}
+          </CardContent>
+        </Card>
+        )}
+      </div>
+
+      {hasConversion && (
+      <ConvertLeadDialog
+        lead={convertLead}
+        open={!!convertLead}
+        onOpenChange={(o) => !o && setConvertLead(null)}
+        onConverted={() => {
+          setConvertLead(null);
+          closeLeadModal();
+        }}
+      />
+      )}
+      {hasSpend && (
+      <MarketingSpendDialog
+        open={spendOpen}
+        onOpenChange={setSpendOpen}
+        sources={sources as any[]}
+        canCreate={can("Marketing Spend", "Create")}
+        canEdit={can("Marketing Spend", "Edit")}
+        canDelete={can("Marketing Spend", "Delete")}
+        isAdmin={!!isAdmin}
+      />
+      )}
+      {hasFollowups && (
+      <FollowUpsSheet
+        open={followUpsOpen}
+        onOpenChange={setFollowUpsOpen}
+        bucket={followUpsBucket}
+        onBucketChange={setFollowUpsBucket}
+        counts={queryClient.getQueryData<any>(["leads", "overview"])?.reminders}
+        onOpenLead={(leadId) => {
+          setFollowUpsOpen(false);
+          setSearchParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set("leadView", leadId);
+            next.set("tab", "reminders");
+            return next;
+          }, { replace: true });
+        }}
+      />
+      )}
+    </DashboardLayout>
+  );
+};
+
+export default Leads;

@@ -1,0 +1,3135 @@
+import { useEffect, useRef, useState } from "react";
+import { formatCustomerAddress } from "@/lib/customerAutofill";
+import { useSearchParams, useNavigate } from "react-router-dom";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { Card, CardContent } from "@/components/ui/card";
+import { TableContainer, Table, TableHeader, TableBody, TableRow, TableHead, TableCell, TablePagination } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useToast } from "@/hooks/use-toast";
+import { useSettings } from "@/context/SettingsContext";
+import { usePermissions } from "@/hooks/usePermissions";
+import { isTrinetraPilotUser } from "@/lib/trinetraPilot";
+import { hasQuotationApproval } from "@/lib/quotationApproval";
+import { useNotificationContext } from "@/context/NotificationContext";
+import { canAccessBankDetails } from "@/lib/bankDetailsAccess";
+import { financeService } from "@/api/services/finance.service";
+import { quotationService } from "@/api/services/quotation.service";
+import { customerService } from "@/api/services/customer.service";
+import { quotationTypeService } from "@/api/services/quotationType.service";
+import { hrmsbranchService } from "@/hrms/services/hrmsbranchService";
+import { mediaService } from "@/api/services/media.service";
+import { resolveImageUrl } from "@/lib/resolveImageUrl";
+import { WhatsAppQuickChat } from "@/components/shared/WhatsAppQuickChat";
+import {
+  LayoutDashboard,
+  FilePlus,
+  FileBarChart,
+  FileText,
+  Plus,
+  Edit,
+  Trash2,
+  X,
+  ImagePlus,
+  Loader2,
+  Building2,
+  Phone,
+  Eye,
+  Save,
+  Download,
+  Star,
+  Palette,
+  RotateCcw,
+  Home,
+  Send,
+  CheckCircle2,
+  XCircle,
+  ShieldCheck,
+  History as HistoryIcon,
+} from "lucide-react";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
+import { defaultPageSize } from "@/lib/tablePageSize";
+
+
+type Stats = { totalThisMonth: number; acceptedThisMonth: number; totalValue: number };
+type Quotation = {
+  _id: string;
+  number: string;
+  date: string;
+  valid_till?: string;
+  total: number;
+  subtotal?: number;
+  total_tax?: number;
+  gst_percent?: number;
+  discount_percent?: number;
+  discount_total?: number;
+  status: string;
+  client?: any;
+  items?: any[];
+  format?: "simple" | "pro";
+  quotation_type?: any;
+  branding?: any;
+  project_details?: any;
+  rooms?: any[];
+  theme?: Partial<ThemeColors>;
+  notes?: string;
+  approval?: { status?: "none" | "pending" | "approved" | "rejected"; comment?: string; requested_by?: any; requested_at?: string };
+};
+type ItemRow = { id: string; description: string; qty: number; rate: number; photoUrl?: string };
+type RoomItem = {
+  id: string;
+  description: string;
+  series: string;
+  model_no: string;
+  unit_price: number;
+  sw: number;
+  fan: number;
+  soc: number;
+  mod: number;
+  qty: number;
+  disc_percent: number;
+  photoUrl?: string;
+};
+type Room = { id: string; name: string; items: RoomItem[] };
+type ThemeColors = {
+  primaryColor: string;
+  roomHeaderBg: string;
+  headerText: string;
+  topBorder: string;
+  flatTypeBg: string;
+  flatTypeText: string;
+};
+
+// Internal sub-sidebar for this module — same pattern as CustomerView.tsx's
+// Profile/Contacts/Notes/... sub-sidebar, just scoped to Quotations.
+const sidebarItems = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "create", label: "Create Quotation", icon: FilePlus },
+  { id: "list", label: "Quotations", icon: FileBarChart },
+];
+
+const DEFAULT_THEME: ThemeColors = {
+  primaryColor: "#3592ea",
+  roomHeaderBg: "#882200",
+  headerText: "#ffffff",
+  topBorder: "#3592ea",
+  flatTypeBg: "#1f2937",
+  flatTypeText: "#ffffff",
+};
+
+const THEME_FIELDS: { key: keyof ThemeColors; label: string; hint: string }[] = [
+  { key: "primaryColor", label: "Primary Color", hint: "Main accent color" },
+  { key: "roomHeaderBg", label: "Room Header BG", hint: "Room title background" },
+  { key: "headerText", label: "Header Text", hint: "Room title text color" },
+  { key: "topBorder", label: "Top Border", hint: "Header border accent" },
+  { key: "flatTypeBg", label: "Flat Type BG", hint: "Flat type banner background" },
+  { key: "flatTypeText", label: "Flat Type Text", hint: "Flat type text color" },
+];
+
+const DEFAULT_NOTES =
+  "1. All prices are exclusive of GST unless stated otherwise.\n2. Installation charges extra as per site visit.\n3. 50% advance required to confirm the order.";
+
+const BRANDING_DEFAULTS_KEY = "quotationBrandingDefaults";
+
+const formatValue = (value: number) => {
+  if (value >= 100000) return `₹${(value / 100000).toFixed(1)}L`;
+  return `₹${value.toLocaleString("en-IN")}`;
+};
+
+const STATUS_STYLES: Record<string, string> = {
+  accepted: "bg-green-100 text-green-700",
+  pending: "bg-amber-100 text-amber-700",
+  sent: "bg-blue-100 text-blue-700",
+  draft: "bg-gray-100 text-gray-600",
+  rejected: "bg-red-100 text-red-700",
+  expired: "bg-slate-100 text-slate-500",
+};
+
+// Internal approval badge (quotation approval add-on), shown beside the client status.
+const APPROVAL_BADGES: Record<string, { label: string; cls: string }> = {
+  none: { label: "Not requested", cls: "bg-gray-100 text-gray-600" },
+  pending: { label: "Awaiting approval", cls: "bg-amber-100 text-amber-700" },
+  approved: { label: "Approved", cls: "bg-green-100 text-green-700" },
+  rejected: { label: "Rejected", cls: "bg-red-100 text-red-700" },
+};
+
+// One row per step in the approval history dialog (dot color + label).
+const HISTORY_LABELS: Record<string, { label: string; cls: string }> = {
+  requested: { label: "Approval requested", cls: "bg-amber-500" },
+  approved: { label: "Approved", cls: "bg-green-600" },
+  rejected: { label: "Rejected", cls: "bg-red-600" },
+  auto_approved: { label: "Approved automatically (created by an approver)", cls: "bg-green-600" },
+  reset: { label: "Sent back for approval", cls: "bg-slate-500" },
+};
+
+const todayISO = () => new Date().toISOString().split("T")[0];
+const plusDaysISO = (days: number) => new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+const emptyItem = (): ItemRow => ({ id: Math.random().toString(36).slice(2, 9), description: "", qty: 1, rate: 0 });
+const emptyRoomItem = (): RoomItem => ({
+  id: Math.random().toString(36).slice(2, 9),
+  description: "",
+  series: "",
+  model_no: "",
+  unit_price: 0,
+  sw: 0,
+  fan: 0,
+  soc: 0,
+  mod: 0,
+  qty: 1,
+  disc_percent: 0,
+});
+const emptyRoom = (name = "Living Room"): Room => ({
+  id: Math.random().toString(36).slice(2, 9),
+  name,
+  items: [emptyRoomItem()],
+});
+
+const roomItemTotal = (it: RoomItem) =>
+  (Number(it.unit_price) || 0) * (Number(it.qty) || 0) * (1 - (Number(it.disc_percent) || 0) / 100);
+const roomTotal = (room: Room) => room.items.reduce((s, it) => s + roomItemTotal(it), 0);
+
+const hexToRgb = (hex?: string): [number, number, number] => {
+  const clean = (hex || "#000000").replace("#", "");
+  const full = clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean;
+  const n = parseInt(full || "000000", 16) || 0;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+
+type LoadedImage = { dataUrl: string; width: number; height: number; format: "PNG" | "JPEG" };
+
+// Re-encodes any browser-decodable image (incl. WebP/AVIF, which jsPDF can't embed)
+// through a canvas, downscaled to maxPx on the longest side so full-size phone
+// photos don't bloat the PDF. Photos go out as JPEG on white; logos stay PNG
+// to keep transparency.
+const loadImageAsDataUrl = async (
+  url?: string,
+  opts: { maxPx?: number; jpeg?: boolean } = {},
+): Promise<LoadedImage | null> => {
+  if (!url) return null;
+  const { maxPx = 800, jpeg = false } = opts;
+
+  const rasterize = (src: string, crossOrigin: boolean) =>
+    new Promise<LoadedImage | null>((resolve) => {
+      const img = new Image();
+      if (crossOrigin) img.crossOrigin = "anonymous";
+      img.onload = () => {
+        try {
+          const srcW = img.naturalWidth || img.width || 100;
+          const srcH = img.naturalHeight || img.height || 100;
+          const scale = Math.min(1, maxPx / Math.max(srcW, srcH));
+          const w = Math.max(1, Math.round(srcW * scale));
+          const h = Math.max(1, Math.round(srcH * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return resolve(null);
+          if (jpeg) {
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, w, h);
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const dataUrl = jpeg ? canvas.toDataURL("image/jpeg", 0.85) : canvas.toDataURL("image/png");
+          resolve({ dataUrl, width: w, height: h, format: jpeg ? "JPEG" : "PNG" });
+        } catch {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+
+  if (url.startsWith("data:image")) return rasterize(url, false);
+
+  const fullUrl = resolveImageUrl(url);
+  const direct = await rasterize(fullUrl, true);
+  if (direct) return direct;
+
+  // Fallback: fetch the bytes and rasterize from a same-origin blob URL.
+  try {
+    const res = await fetch(fullUrl, { mode: "cors" });
+    if (!res.ok) return null;
+    const objectUrl = URL.createObjectURL(await res.blob());
+    try {
+      return await rasterize(objectUrl, false);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  } catch {
+    return null;
+  }
+};
+
+export default function QuotationModule() {
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState(searchParams.get("tab") || "dashboard");
+  const typeSlug = searchParams.get("type") || "";
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const { getSetting } = useSettings();
+  const { user, isModuleEnabled, can } = usePermissions();
+  const isPilot = isTrinetraPilotUser(user?.email);
+  // Quotation approval add-on: makers request, approvers (Quotations > Approve,
+  // admins always) sign off before the PDF can go to the client.
+  const approvalOn = hasQuotationApproval(user);
+  const canApprove = approvalOn && can("Quotations", "Approve");
+  // Quotations from before the add-on have no approval status and stay usable.
+  const isCleared = (q: any) => !approvalOn || !q?.approval?.status || q.approval.status === "approved";
+  const tabs = canApprove
+    ? [...sidebarItems, { id: "approvals", label: "Approvals", icon: ShieldCheck }]
+    : sidebarItems;
+  const canUseBankDetails = canAccessBankDetails(user?.email);
+  // Branch-scoped customer selection is sourced from the HRMS module — only
+  // show/fetch it when the tenant's plan actually includes HRMS, otherwise
+  // fall back to picking a customer from the full, unscoped list.
+  const canUseBranch = isModuleEnabled("hrms");
+
+  const { data: bankDetails = [] } = useQuery<any[]>({
+    queryKey: ["bank-details"],
+    queryFn: () => financeService.getBankDetails().then((res: any) => res.data || res),
+    enabled: canUseBankDetails,
+  });
+  const activeBankDetails = bankDetails.filter((b: any) => b.active !== false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(searchParams);
+    if (activeTab !== params.get("tab")) {
+      params.set("tab", activeTab);
+      setSearchParams(params, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Follow ?tab= when it changes from outside (e.g. clicking an approval
+  // notification while this page is already open).
+  const urlTab = searchParams.get("tab");
+  useEffect(() => {
+    if (urlTab && urlTab !== activeTab) setActiveTab(urlTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlTab]);
+
+  // ─── Quotation type (dynamic "Quotation Maker" entry this page was opened for) ──
+  const { data: quotationTypes = [] } = useQuery<any[]>({
+    queryKey: ["quotation-types"],
+    queryFn: () => quotationTypeService.getQuotationTypes(),
+  });
+  const currentType = typeSlug ? quotationTypes.find((t: any) => t.slug === typeSlug) : undefined;
+  const allowedFormat: "simple" | "pro" | "both" = currentType?.format || "both";
+
+  // ─── HRMS branches linked to the current quotation type — used to scope the
+  // Customer dropdown below to only the customers assigned to those branches ──
+  const { data: branches = [] } = useQuery<any[]>({
+    queryKey: ["hrms-branches-for-quotation"],
+    queryFn: () => hrmsbranchService.getAll({ limit: 1000 }).then(res => res.data),
+    enabled: activeTab === "create" && canUseBranch,
+  });
+  const idOf = (ref: any): string => (typeof ref === "string" ? ref : ref?._id || ref?.id || "");
+  const branchIdsForType = currentType
+    ? branches.filter((b: any) => (b.quotationTypes || []).some((qt: any) => idOf(qt) === currentType._id)).map((b: any) => idOf(b))
+    : [];
+
+  // ─── Dashboard data (scoped to the current quotation type, if any) ────
+  const { data: stats } = useQuery<Stats>({
+    queryKey: ["quotation-stats", currentType?._id],
+    queryFn: async () => {
+      try {
+        return await quotationService.getStats(currentType?._id);
+      } catch {
+        return { totalThisMonth: 0, acceptedThisMonth: 0, totalValue: 0 };
+      }
+    },
+    enabled: activeTab === "dashboard",
+  });
+
+  const { data: recent = [], isLoading } = useQuery<Quotation[]>({
+    queryKey: ["quotations-recent", currentType?._id],
+    queryFn: async () => {
+      try {
+        const result = await quotationService.getQuotations(5, currentType?._id);
+        return Array.isArray(result) ? result : [];
+      } catch {
+        return [];
+      }
+    },
+    enabled: activeTab === "dashboard",
+  });
+
+  // ─── List tab: server-side paginated (per page-size selection); "All" falls
+  // back to the old unbounded fetch, exactly as this tab always did before. ──
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(() => String(defaultPageSize(25)));
+
+  interface QuotationsListPage { rows: Quotation[]; total: number; pages: number }
+  const { data: quotationsListResult, isLoading: isLoadingList } = useQuery<QuotationsListPage>({
+    queryKey: ["quotations-list", currentType?._id, currentPage, itemsPerPage],
+    queryFn: async () => {
+      if (itemsPerPage === "All") {
+        try {
+          const result = await quotationService.getQuotations(undefined, currentType?._id);
+          const rows = Array.isArray(result) ? result : [];
+          return { rows, total: rows.length, pages: 1 };
+        } catch {
+          return { rows: [], total: 0, pages: 1 };
+        }
+      }
+      try {
+        const res: any = await quotationService.getQuotationsList({
+          page: currentPage,
+          limit: itemsPerPage,
+          quotation_type: currentType?._id,
+        });
+        if (Array.isArray(res)) return { rows: [], total: 0, pages: 1 };
+        return { rows: res?.data ?? [], total: res?.total ?? 0, pages: res?.pages ?? 1 };
+      } catch {
+        return { rows: [], total: 0, pages: 1 };
+      }
+    },
+    enabled: activeTab === "list",
+  });
+  const quotationsList = quotationsListResult?.rows ?? [];
+  const totalQuotations = quotationsListResult?.total ?? 0;
+  const quotationsPageSize = itemsPerPage === "All" ? (totalQuotations || 1) : parseInt(itemsPerPage);
+  const totalQuotationPages = quotationsListResult?.pages ?? 1;
+  const safeQuotationsPage = Math.min(currentPage, totalQuotationPages);
+
+  const totalThisMonth = stats?.totalThisMonth ?? 0;
+  const acceptedThisMonth = stats?.acceptedThisMonth ?? 0;
+  const totalValue = stats?.totalValue ?? 0;
+
+  // ─── Create/Edit Quotation form state ────────────────────────────────
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [clientId, setClientId] = useState("");
+  // Branch picked first on the Create Quotation form — the Customer dropdown
+  // below only lists customers belonging to this branch.
+  const [selectedBranchId, setSelectedBranchId] = useState("");
+  const [isAddingCustomer, setIsAddingCustomer] = useState(false);
+  const emptyNewCustomer = {
+    company: "", customer_reference: "", contact_person: "", vat: "",
+    phonenumber: "", email: "", website: "", pan_number: "", gst_number: "",
+    account_details: "", address: "", city: "", state: "", zip: "", country: "", branch: "",
+  };
+  const [newCustomerForm, setNewCustomerForm] = useState(emptyNewCustomer);
+  const [contactNumber, setContactNumber] = useState("");
+  const [address, setAddress] = useState("");
+  const [quotationDate, setQuotationDate] = useState(todayISO());
+  const [validUntil, setValidUntil] = useState(plusDaysISO(20));
+  const [items, setItems] = useState<ItemRow[]>([emptyItem()]);
+  const [gstPercent, setGstPercent] = useState(18);
+  const [discountPercent, setDiscountPercent] = useState(0);
+  const [notes, setNotes] = useState(DEFAULT_NOTES);
+  const [bankDetailId, setBankDetailId] = useState("");
+
+  // Simple vs Pro create-format — forced when the type restricts it, otherwise user-toggled.
+  const [format, setFormat] = useState<"simple" | "pro">(allowedFormat === "pro" ? "pro" : "simple");
+  useEffect(() => {
+    if (allowedFormat === "pro") setFormat("pro");
+    else if (allowedFormat === "simple") setFormat("simple");
+  }, [allowedFormat]);
+
+  // Pro-only: project details + rooms & items
+  const [projectBuilding, setProjectBuilding] = useState("");
+  const [unitNo, setUnitNo] = useState("");
+  const [flatType, setFlatType] = useState("");
+  const [rooms, setRooms] = useState<Room[]>([emptyRoom()]);
+  const [beforeImages, setBeforeImages] = useState<string[]>([]);
+  const [afterImages, setAfterImages] = useState<string[]>([]);
+
+  // PDF theme customization — defaults to the quotation type's saved theme.
+  const [theme, setTheme] = useState<ThemeColors>(DEFAULT_THEME);
+  const [showThemeColors, setShowThemeColors] = useState(false);
+  useEffect(() => {
+    if (currentType?.theme) setTheme({ ...DEFAULT_THEME, ...currentType.theme });
+  }, [currentType?._id]);
+
+  const getSavedBrandingDefaults = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(BRANDING_DEFAULTS_KEY) || "null");
+      if (saved) {
+        return {
+          companyName: saved.companyName ?? getSetting("companyName", ""),
+          fullCompanyName: saved.fullCompanyName ?? "",
+          tagline: saved.tagline ?? "",
+          brandAddress: saved.brandAddress ?? "",
+          defaultContactNumber: saved.defaultContactNumber ?? "",
+          brandLogoUrl: saved.brandLogoUrl ?? null,
+        };
+      }
+    } catch {
+      /* ignore */
+    }
+    return {
+      companyName: getSetting("companyName", ""),
+      fullCompanyName: "",
+      tagline: "",
+      brandAddress: "",
+      defaultContactNumber: "",
+      brandLogoUrl: null,
+    };
+  };
+
+  // Branding — defaults to saved branding or CRM company defaults
+  const [companyName, setCompanyName] = useState(() => getSavedBrandingDefaults().companyName);
+  const [fullCompanyName, setFullCompanyName] = useState(() => getSavedBrandingDefaults().fullCompanyName);
+  const [tagline, setTagline] = useState(() => getSavedBrandingDefaults().tagline);
+  const [brandAddress, setBrandAddress] = useState(() => getSavedBrandingDefaults().brandAddress);
+  const [defaultContactNumber, setDefaultContactNumber] = useState(() => getSavedBrandingDefaults().defaultContactNumber);
+  const [brandLogoUrl, setBrandLogoUrl] = useState<string | null>(() => getSavedBrandingDefaults().brandLogoUrl);
+  const [clientLogoUrl, setClientLogoUrl] = useState<string | null>(null);
+  const [showItemImages, setShowItemImages] = useState(true);
+  const [saveBrandingDefault, setSaveBrandingDefault] = useState(false);
+  const [uploadingKey, setUploadingKey] = useState<string | null>(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+
+  // Preload saved branding defaults for brand-new quotations
+  useEffect(() => {
+    if (editingId) return;
+    const saved = getSavedBrandingDefaults();
+    setCompanyName(saved.companyName);
+    setFullCompanyName(saved.fullCompanyName);
+    setTagline(saved.tagline);
+    setBrandAddress(saved.brandAddress);
+    setDefaultContactNumber(saved.defaultContactNumber);
+    setBrandLogoUrl(saved.brandLogoUrl);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const { data: customers = [] } = useQuery({
+    queryKey: ["customers"],
+    queryFn: () => customerService.getAll().then((res: any) => res.data || res),
+    enabled: activeTab === "create",
+  });
+  // Branch choices offered on the Create Quotation form — scoped to the branch(es)
+  // tied to this quotation type, when any are configured, otherwise every branch.
+  const branchesForType = branchIdsForType.length
+    ? branches.filter((b: any) => branchIdsForType.includes(idOf(b)))
+    : branches;
+  // Auto-pick the branch when only one is available for this quotation type.
+  useEffect(() => {
+    if (!selectedBranchId && branchesForType.length === 1) {
+      setSelectedBranchId(idOf(branchesForType[0]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branchesForType.length]);
+  // The Customer dropdown only lists customers belonging to the selected branch —
+  // unless the tenant's plan doesn't include HRMS, in which case there's no
+  // branch data to scope by, so every customer is offered instead.
+  const customersForType = !canUseBranch
+    ? customers
+    : selectedBranchId
+      ? customers.filter((c: any) => idOf(c.branch) === selectedBranchId)
+      : [];
+  // When editing an existing quotation, derive the branch from the loaded client
+  // so the Customer field stays populated (the quotation itself has no branch of its own).
+  useEffect(() => {
+    if (!editingId || !clientId || selectedBranchId) return;
+    const c = customers.find((x: any) => x._id === clientId);
+    if (c?.branch) setSelectedBranchId(idOf(c.branch));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId, clientId, customers]);
+
+  // Rudraverse-only: let the user fill in a brand-new customer's details straight
+  // from this form instead of only picking from the existing list — creates a
+  // real Client record so it behaves exactly like any other selected customer.
+  const createCustomerMutation = useMutation({
+    mutationFn: (data: typeof emptyNewCustomer) => customerService.create(data),
+    onSuccess: (created: any) => {
+      const newCustomer = created?.data || created;
+      queryClient.invalidateQueries({ queryKey: ["customers"] });
+      setClientId(newCustomer._id);
+      setIsAddingCustomer(false);
+      setNewCustomerForm(emptyNewCustomer);
+      toast({ title: "Customer added", description: `"${newCustomer.company}" is now saved and selected.` });
+    },
+    onError: (error: any) => {
+      toast({ title: "Error", description: error.message || "Failed to add customer", variant: "destructive" });
+    },
+  });
+
+  // "+ Add new branch" redirects to the real HRMS "New Branch" page (same full form
+  // used everywhere else), which redirects back here afterwards with ?newBranchId=...
+  // — pick it up and auto-select it, then strip it from the URL.
+  useEffect(() => {
+    const newBranchId = searchParams.get("newBranchId");
+    if (!newBranchId) return;
+    setSelectedBranchId(newBranchId);
+    setClientId("");
+    const params = new URLSearchParams(searchParams);
+    params.delete("newBranchId");
+    setSearchParams(params, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const { data: selectedCustomer } = useQuery({
+    queryKey: ["customer", clientId],
+    queryFn: () => customerService.getById(clientId).then((res: any) => res.data || res),
+    enabled: activeTab === "create" && !!clientId,
+  });
+
+  // Auto-fill contact/address from the CRM's real customer record once selected —
+  // still editable afterwards in case the quotation needs a different contact.
+  // Runs once per newly picked customer: editing a saved quotation marks its
+  // customer as already filled (handleEdit), so the saved contact/address are
+  // never overwritten by the live customer record. Billing address first.
+  const autofilledCustomer = useRef<string>("");
+  useEffect(() => {
+    if (!selectedCustomer?._id) return;
+    const id = String(selectedCustomer._id);
+    if (autofilledCustomer.current === id) return;
+    autofilledCustomer.current = id;
+    setContactNumber((selectedCustomer.phonenumber || "").replace(/\D/g, "").slice(0, 10));
+    setAddress(formatCustomerAddress(selectedCustomer));
+  }, [selectedCustomer]);
+
+  const resetForm = () => {
+    setEditingId(null);
+    autofilledCustomer.current = "";
+    setClientId("");
+    setSelectedBranchId("");
+    setContactNumber("");
+    setAddress("");
+    setQuotationDate(todayISO());
+    setValidUntil(plusDaysISO(20));
+    setItems([emptyItem()]);
+    setGstPercent(18);
+    setDiscountPercent(0);
+    setNotes(DEFAULT_NOTES);
+    setBankDetailId("");
+    setFormat(allowedFormat === "pro" ? "pro" : "simple");
+    setProjectBuilding("");
+    setUnitNo("");
+    setFlatType("");
+    setRooms([emptyRoom()]);
+    setBeforeImages([]);
+    setAfterImages([]);
+    setTheme(currentType?.theme ? { ...DEFAULT_THEME, ...currentType.theme } : DEFAULT_THEME);
+    setShowThemeColors(false);
+
+    const saved = getSavedBrandingDefaults();
+    setCompanyName(saved.companyName);
+    setFullCompanyName(saved.fullCompanyName);
+    setTagline(saved.tagline);
+    setBrandAddress(saved.brandAddress);
+    setDefaultContactNumber(saved.defaultContactNumber);
+    setBrandLogoUrl(saved.brandLogoUrl);
+    setClientLogoUrl(null);
+    setShowItemImages(true);
+  };
+
+  const addItemRow = () => setItems((prev) => [...prev, emptyItem()]);
+  const removeItemRow = (id: string) => setItems((prev) => (prev.length > 1 ? prev.filter((i) => i.id !== id) : prev));
+  const updateItem = (id: string, field: keyof ItemRow, value: any) =>
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, [field]: value } : i)));
+
+  // ─── Rooms & Items (Pro format) ───────────────────────────────────────
+  const addRoom = () => setRooms((prev) => [...prev, emptyRoom(`Room ${prev.length + 1}`)]);
+  const removeRoom = (roomId: string) => setRooms((prev) => (prev.length > 1 ? prev.filter((r) => r.id !== roomId) : prev));
+  const updateRoomName = (roomId: string, name: string) =>
+    setRooms((prev) => prev.map((r) => (r.id === roomId ? { ...r, name } : r)));
+  const addItemToRoom = (roomId: string) =>
+    setRooms((prev) => prev.map((r) => (r.id === roomId ? { ...r, items: [...r.items, emptyRoomItem()] } : r)));
+  const removeRoomItem = (roomId: string, itemId: string) =>
+    setRooms((prev) =>
+      prev.map((r) =>
+        r.id === roomId ? { ...r, items: r.items.length > 1 ? r.items.filter((i) => i.id !== itemId) : r.items } : r
+      )
+    );
+  const updateRoomItem = (roomId: string, itemId: string, field: keyof RoomItem, value: any) =>
+    setRooms((prev) =>
+      prev.map((r) =>
+        r.id === roomId ? { ...r, items: r.items.map((i) => (i.id === itemId ? { ...i, [field]: value } : i)) } : r
+      )
+    );
+
+  // ─── Uploads (brand/client logo, room item photo, before/after attachments) ──
+  const uploadAsset = async (file: File, key: string): Promise<string | null> => {
+    setUploadingKey(key);
+    try {
+      const res: any = await mediaService.uploadFile(file, "quotations");
+      const filename = res?.file?.filename;
+      // Stored relative so the link follows whichever server hosts this company's
+      // data (shared or dedicated); resolveImageUrl adds the current backend origin.
+      return filename ? `/uploads/media/quotations/${filename}` : null;
+    } catch {
+      toast({ title: "Upload failed", description: "Could not upload the file. Please try again.", variant: "destructive" });
+      return null;
+    } finally {
+      setUploadingKey(null);
+    }
+  };
+
+  const handleBrandLogoPick = async (file: File | undefined) => {
+    if (!file) return;
+    const url = await uploadAsset(file, "brandLogo");
+    if (url) setBrandLogoUrl(url);
+  };
+  const handleClientLogoPick = async (file: File | undefined) => {
+    if (!file) return;
+    const url = await uploadAsset(file, "clientLogo");
+    if (url) setClientLogoUrl(url);
+  };
+  const handleRoomItemPhotoPick = async (roomId: string, itemId: string, file: File | undefined) => {
+    if (!file) return;
+    const url = await uploadAsset(file, `room-${roomId}-${itemId}`);
+    if (url) updateRoomItem(roomId, itemId, "photoUrl", url);
+  };
+  const handleSimpleItemPhotoPick = async (itemId: string, file: File | undefined) => {
+    if (!file) return;
+    const url = await uploadAsset(file, `simple-${itemId}`);
+    if (url) updateItem(itemId, "photoUrl", url);
+  };
+  const handleAddBeforeImage = async (file: File | undefined) => {
+    if (!file) return;
+    const url = await uploadAsset(file, "before");
+    if (url) setBeforeImages((prev) => [...prev, url]);
+  };
+  const handleAddAfterImage = async (file: File | undefined) => {
+    if (!file) return;
+    const url = await uploadAsset(file, "after");
+    if (url) setAfterImages((prev) => [...prev, url]);
+  };
+
+  const persistBrandingDefaults = () => {
+    // Save branding defaults (including Trinetra mobile number) so it persists across sessions
+    const currentSaved = getSavedBrandingDefaults();
+    const updated = {
+      ...currentSaved,
+      companyName: companyName || currentSaved.companyName,
+      fullCompanyName: fullCompanyName || currentSaved.fullCompanyName,
+      tagline: tagline || currentSaved.tagline,
+      brandAddress: brandAddress || currentSaved.brandAddress,
+      defaultContactNumber: defaultContactNumber || currentSaved.defaultContactNumber,
+      brandLogoUrl: brandLogoUrl !== undefined ? brandLogoUrl : currentSaved.brandLogoUrl,
+    };
+    localStorage.setItem(BRANDING_DEFAULTS_KEY, JSON.stringify(updated));
+  };
+
+  const simpleSubtotal = items.reduce((acc, i) => acc + (Number(i.qty) || 0) * (Number(i.rate) || 0), 0);
+  const proSubtotal = rooms.reduce((acc, r) => acc + roomTotal(r), 0);
+  const subtotal = format === "pro" ? proSubtotal : simpleSubtotal;
+  const discountAmount = subtotal * (discountPercent / 100);
+  const taxableAmount = subtotal - discountAmount;
+  const gstAmount = taxableAmount * (gstPercent / 100);
+  const grandTotal = taxableAmount + gstAmount;
+
+  const buildPayload = (status: string) => ({
+    client: clientId || undefined,
+    contact_number: contactNumber,
+    client_address: address,
+    date: quotationDate,
+    valid_till: validUntil,
+    status,
+    quotation_type: currentType?._id,
+    format,
+    gst_percent: gstPercent,
+    notes,
+    show_item_images: showItemImages,
+    items:
+      format === "simple"
+        ? items.filter((i) => i.description.trim()).map((i) => ({ description: i.description, qty: Number(i.qty) || 0, rate: Number(i.rate) || 0, photo_url: i.photoUrl || "" }))
+        : [],
+    rooms:
+      format === "pro"
+        ? rooms.map((r) => ({
+          name: r.name,
+          items: r.items.map((it) => ({
+            description: it.description,
+            series: it.series,
+            model_no: it.model_no,
+            unit_price: Number(it.unit_price) || 0,
+            sw: Number(it.sw) || 0,
+            fan: Number(it.fan) || 0,
+            soc: Number(it.soc) || 0,
+            mod: Number(it.mod) || 0,
+            qty: Number(it.qty) || 1,
+            disc_percent: Number(it.disc_percent) || 0,
+            photo_url: it.photoUrl || "",
+          })),
+        }))
+        : [],
+    branding: {
+      brandName: companyName,
+      fullCompanyName,
+      tagline,
+      contactAddress: brandAddress,
+      defaultContactNumber: defaultContactNumber || getSavedBrandingDefaults().defaultContactNumber,
+      brandLogoUrl,
+      clientLogoUrl,
+    },
+    project_details: { project_building: projectBuilding, unit_no: unitNo, flat_type: flatType },
+    theme,
+    attachments: { before_images: beforeImages, after_images: afterImages },
+    subtotal,
+    discount_percent: discountPercent,
+    discount_total: discountAmount,
+    total_tax: gstAmount,
+    total: grandTotal,
+    bank_detail: bankDetailId || undefined,
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (status: string) => quotationService.create(buildPayload(status)),
+    onSuccess: () => {
+      persistBrandingDefaults();
+      queryClient.invalidateQueries({ queryKey: ["quotation-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["quotations-recent"] });
+      queryClient.invalidateQueries({ queryKey: ["quotations-list"] });
+      toast({ title: "Quotation saved", description: "Your quotation has been saved successfully." });
+      resetForm();
+      setActiveTab("dashboard");
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error?.response?.data?.message || "Failed to save quotation",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (status: string) => quotationService.update(editingId, buildPayload(status)),
+    onSuccess: () => {
+      persistBrandingDefaults();
+      queryClient.invalidateQueries({ queryKey: ["quotation-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["quotations-recent"] });
+      queryClient.invalidateQueries({ queryKey: ["quotations-list"] });
+      toast({ title: "Quotation updated", description: "Your quotation has been updated successfully." });
+      resetForm();
+      setActiveTab("list");
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error?.response?.data?.message || "Failed to update quotation",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => quotationService.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["quotation-stats"] });
+      queryClient.invalidateQueries({ queryKey: ["quotations-recent"] });
+      queryClient.invalidateQueries({ queryKey: ["quotations-list"] });
+      toast({ title: "Deleted", description: "Quotation deleted successfully." });
+    },
+  });
+
+  // ─── Approval flow ────────────────────────────────────────────────────
+  const { data: pendingApprovals = [], isLoading: isLoadingApprovals } = useQuery<Quotation[]>({
+    queryKey: ["quotation-approvals"],
+    queryFn: async () => {
+      const result = await quotationService.getPendingApprovals();
+      return Array.isArray(result) ? result : [];
+    },
+    enabled: canApprove,
+  });
+
+  const refreshQuotationLists = () => {
+    queryClient.invalidateQueries({ queryKey: ["quotations-recent"] });
+    queryClient.invalidateQueries({ queryKey: ["quotations-list"] });
+    queryClient.invalidateQueries({ queryKey: ["quotation-approvals"] });
+  };
+  const approvalError = (error: any) =>
+    toast({ title: "Error", description: error?.response?.data?.message || error?.message || "Something went wrong", variant: "destructive" });
+
+  const requestApprovalMutation = useMutation({
+    mutationFn: (id: string) => quotationService.requestApproval(id),
+    onSuccess: () => {
+      refreshQuotationLists();
+      toast({ title: "Approval requested", description: "An approver will review this quotation." });
+    },
+    onError: approvalError,
+  });
+
+  const approveMutation = useMutation({
+    mutationFn: (id: string) => quotationService.approve(id),
+    onSuccess: () => {
+      refreshQuotationLists();
+      toast({ title: "Approved", description: "The quotation can now be sent to the client." });
+    },
+    onError: approvalError,
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: ({ id, comment }: { id: string; comment: string }) => quotationService.reject(id, comment),
+    onSuccess: () => {
+      refreshQuotationLists();
+      toast({ title: "Rejected", description: "The maker can edit it and request approval again." });
+    },
+    onError: approvalError,
+  });
+
+  const handleReject = (id: string) => {
+    const comment = window.prompt("Reason for rejecting (the maker will see this):");
+    if (comment === null) return;
+    if (!comment.trim()) {
+      toast({ title: "Reason required", description: "Please enter a reason for rejecting.", variant: "destructive" });
+      return;
+    }
+    rejectMutation.mutate({ id, comment: comment.trim() });
+  };
+
+  const approvalBusy = requestApprovalMutation.isPending || approveMutation.isPending || rejectMutation.isPending;
+
+  // Refresh badges/lists the moment an approval alert arrives on the socket.
+  const { socket } = useNotificationContext();
+  useEffect(() => {
+    if (!socket || !approvalOn) return;
+    const onApproval = () => refreshQuotationLists();
+    socket.on("quotationApproval", onApproval);
+    return () => {
+      socket.off("quotationApproval", onApproval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, approvalOn]);
+
+  // Approval history dialog
+  const [historyFor, setHistoryFor] = useState<Quotation | null>(null);
+  const { data: historyData, isLoading: isLoadingHistory } = useQuery<any>({
+    queryKey: ["quotation-approval-history", historyFor?._id],
+    queryFn: () => quotationService.getApprovalHistory(historyFor!._id),
+    enabled: !!historyFor,
+  });
+
+  const handleEdit = (q: Quotation) => {
+    setEditingId(q._id);
+    const editClientId = q.client?._id || q.client?.id || (typeof q.client === "string" ? q.client : "");
+    autofilledCustomer.current = String(editClientId || ""); // keep the saved contact/address
+    setClientId(editClientId);
+    setContactNumber((q as any).contact_number || q.client?.phonenumber || "");
+    setAddress((q as any).client_address || [q.client?.address, q.client?.city, q.client?.state, q.client?.zip, q.client?.country].filter(Boolean).join(", ") || "");
+    setQuotationDate(q.date ? new Date(q.date).toISOString().split("T")[0] : todayISO());
+    setValidUntil(q.valid_till ? new Date(q.valid_till).toISOString().split("T")[0] : plusDaysISO(20));
+    setNotes(q.notes || DEFAULT_NOTES);
+    setGstPercent(q.gst_percent ?? (q.total_tax && q.subtotal ? Math.round((q.total_tax / q.subtotal) * 100) : 18));
+    setDiscountPercent(q.discount_percent || 0);
+    setBankDetailId((q as any).bank_detail?._id || (q as any).bank_detail || "");
+    setFormat(q.format === "pro" ? "pro" : "simple");
+    setShowItemImages((q as any).show_item_images !== false);
+
+    if (q.items && q.items.length > 0) {
+      setItems(
+        q.items.map((i) => ({
+          id: Math.random().toString(36).slice(2, 9),
+          description: i.description || "",
+          qty: i.qty || 1,
+          rate: i.rate || 0,
+          photoUrl: (i as any).photo_url || (i as any).photoUrl || "",
+        }))
+      );
+    } else {
+      setItems([emptyItem()]);
+    }
+
+    if (q.rooms && q.rooms.length > 0) {
+      setRooms(
+        q.rooms.map((r: any) => ({
+          id: Math.random().toString(36).slice(2, 9),
+          name: r.name || "Room",
+          items:
+            r.items && r.items.length > 0
+              ? r.items.map((it: any) => ({
+                id: Math.random().toString(36).slice(2, 9),
+                description: it.description || "",
+                series: it.series || "",
+                model_no: it.model_no || "",
+                unit_price: it.unit_price || 0,
+                sw: it.sw || 0,
+                fan: it.fan || 0,
+                soc: it.soc || 0,
+                mod: it.mod || 0,
+                qty: it.qty || 1,
+                disc_percent: it.disc_percent || 0,
+                photoUrl: it.photo_url || it.photoUrl || "",
+              }))
+              : [emptyRoomItem()],
+        }))
+      );
+    } else {
+      setRooms([emptyRoom()]);
+    }
+
+    setProjectBuilding(q.project_details?.project_building || "");
+    setUnitNo(q.project_details?.unit_no || "");
+    setFlatType(q.project_details?.flat_type || "");
+    setTheme({ ...DEFAULT_THEME, ...(q.theme || {}) });
+    setBeforeImages((q as any).attachments?.before_images || []);
+    setAfterImages((q as any).attachments?.after_images || []);
+
+    const defaults = getSavedBrandingDefaults();
+    setCompanyName(q.branding?.brandName || defaults.companyName);
+    setFullCompanyName(q.branding?.fullCompanyName || defaults.fullCompanyName);
+    setTagline(q.branding?.tagline || defaults.tagline);
+    setBrandAddress(q.branding?.contactAddress || defaults.brandAddress);
+    setDefaultContactNumber(q.branding?.defaultContactNumber || defaults.defaultContactNumber);
+    setBrandLogoUrl(q.branding?.brandLogoUrl !== undefined ? q.branding.brandLogoUrl : defaults.brandLogoUrl);
+    setClientLogoUrl(q.branding?.clientLogoUrl || null);
+
+    setActiveTab("create");
+  };
+
+  const validate = (isDraft = false) => {
+    if (isDraft) return true;
+    if (!clientId) {
+      toast({ title: "Validation Error", description: "Please select a customer.", variant: "destructive" });
+      return false;
+    }
+    if (format === "simple" && !items.some((i) => i.description.trim())) {
+      toast({ title: "Validation Error", description: "Add at least one item.", variant: "destructive" });
+      return false;
+    }
+    if (format === "pro" && !rooms.some((r) => r.items.some((i) => i.description.trim()))) {
+      toast({ title: "Validation Error", description: "Add at least one item to a room.", variant: "destructive" });
+      return false;
+    }
+    return true;
+  };
+
+  const handleSaveDraft = () => {
+    if (!validate(true)) return;
+    const mut = editingId ? updateMutation : createMutation;
+    mut.mutate("draft", {
+      onSuccess: () => {
+        toast({
+          title: editingId ? "Draft updated" : "Draft saved",
+          description: "Your quotation has been saved as a draft.",
+        });
+      },
+    });
+  };
+
+  const handleSaveAndDownload = () => {
+    if (!validate(false)) return;
+    const currentStatus = editingId ? (quotationsList.find((q) => q._id === editingId)?.status || "sent") : "sent";
+    const payload = buildPayload(currentStatus);
+    const mut = editingId ? updateMutation : createMutation;
+    mut.mutate(currentStatus, {
+      onSuccess: (saved: any) => {
+        const fullData = saved || payload;
+        handleDownloadPDF({
+          ...fullData,
+          number: fullData.number || (editingId ? quotationsList.find((q) => q._id === editingId)?.number : undefined),
+          contact_number: contactNumber,
+          client_address: address,
+          client: { company: selectedClientLabel, phonenumber: contactNumber, address },
+        });
+      },
+    });
+  };
+
+  const handlePreviewAndSave = () => {
+    if (!validate(false)) return;
+    setIsPreviewOpen(true);
+  };
+
+  const handleConfirmPreviewSave = () => {
+    setIsPreviewOpen(false);
+    const mut = editingId ? updateMutation : createMutation;
+    mut.mutate("sent", {
+      onSuccess: () => toast({ title: editingId ? "Quotation updated" : "Quotation saved", description: "Your quotation has been saved successfully." }),
+    });
+  };
+
+  // Maker's one-click path: save (the server keeps it as a draft until
+  // approved), then ask for approval on the saved quotation.
+  const handleSaveAndRequestApproval = () => {
+    if (!validate(false)) return;
+    const mut = editingId ? updateMutation : createMutation;
+    mut.mutate("draft", {
+      onSuccess: (saved: any) => {
+        if (saved?._id) requestApprovalMutation.mutate(saved._id);
+      },
+    });
+  };
+
+  const handleDownloadPDF = async (q: Quotation) => {
+    // Approvers may download anything (to review it); everyone else only
+    // once the quotation is approved.
+    if (!isCleared(q) && !canApprove) {
+      const status = (q as any).approval?.status;
+      toast({
+        title: "Approval needed",
+        description:
+          status === "pending"
+            ? "This quotation is awaiting approval. You can download it once it is approved."
+            : "Saved. Request approval first — you can download the PDF once it is approved.",
+        variant: "destructive",
+      });
+      return;
+    }
+    const doc = new jsPDF();
+
+    // Full-page attachment images (before / after the quotation body), fitted inside A4 margins.
+    const drawFullPageImage = (img: LoadedImage) => {
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = 10;
+      const ratio = Math.min((pageW - margin * 2) / img.width, (pageH - margin * 2) / img.height);
+      const w = img.width * ratio;
+      const h = img.height * ratio;
+      try {
+        doc.addImage(img.dataUrl, img.format, (pageW - w) / 2, (pageH - h) / 2, w, h);
+      } catch {
+        /* unsupported image — leave the page blank rather than fail the PDF */
+      }
+    };
+    const loadAttachments = async (urls?: string[]) =>
+      (await Promise.all((urls || []).map((u) => loadImageAsDataUrl(u, { maxPx: 1600, jpeg: true })))).filter(
+        (x): x is LoadedImage => !!x,
+      );
+    const beforePages = await loadAttachments((q as any).attachments?.before_images);
+    const afterPages = await loadAttachments((q as any).attachments?.after_images);
+    if (beforePages.length) {
+      beforePages.forEach((img, i) => {
+        if (i > 0) doc.addPage();
+        drawFullPageImage(img);
+      });
+      doc.addPage();
+    }
+
+    const docTheme: ThemeColors = { ...DEFAULT_THEME, ...(q.theme || {}) };
+    const primaryRgb = hexToRgb(docTheme.primaryColor);
+    // jsPDF's built-in fonts (Helvetica/Times/Courier) don't include a glyph for ₹ — it prints
+    // as a garbled superscript character — so PDF output uses "Rs." instead of the rupee sign.
+    const pdfCurrency = (n: number) => `Rs. ${Math.round(n || 0).toLocaleString("en-IN")}`;
+
+    // Letterhead — brand logo (left) + client logo (right), best-effort (skipped silently if unreachable).
+    const brandLogoData = await loadImageAsDataUrl(q.branding?.brandLogoUrl);
+    const clientLogoData = await loadImageAsDataUrl(q.branding?.clientLogoUrl);
+    if (brandLogoData) {
+      try {
+        const ratio = Math.min(22 / brandLogoData.width, 20 / brandLogoData.height);
+        const w = brandLogoData.width * ratio;
+        const h = brandLogoData.height * ratio;
+        const yPos = 8 + (20 - h) / 2;
+        doc.addImage(brandLogoData.dataUrl, brandLogoData.format, 14, yPos, w, h);
+      } catch {
+        /* unsupported image format — skip embedding, PDF still generates */
+      }
+    }
+    if (clientLogoData) {
+      try {
+        const ratio = Math.min(22 / clientLogoData.width, 20 / clientLogoData.height);
+        const w = clientLogoData.width * ratio;
+        const h = clientLogoData.height * ratio;
+        const yPos = 8 + (20 - h) / 2;
+        const xPos = 196 - w;
+        doc.addImage(clientLogoData.dataUrl, clientLogoData.format, xPos, yPos, w, h);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const textX = brandLogoData ? 40 : 14;
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(18);
+    doc.text(q.branding?.brandName || "Company Name", textX, 18);
+    doc.setFontSize(9);
+    doc.setTextColor(90, 90, 90);
+    if (q.branding?.tagline) doc.text(q.branding.tagline, textX, 24);
+    if (q.branding?.fullCompanyName) doc.text(q.branding.fullCompanyName, textX, 29);
+
+    doc.setDrawColor(...primaryRgb);
+    doc.setLineWidth(1);
+    doc.line(14, 32, 196, 32);
+
+    const flatBg = hexToRgb(docTheme.flatTypeBg);
+    const flatText = hexToRgb(docTheme.flatTypeText);
+    const headerTextRgb = hexToRgb(docTheme.headerText);
+    const roomBg = hexToRgb(docTheme.roomHeaderBg);
+    const clientName = q.client?.company || q.client?.name || "Client";
+    const clientPhone = (q as any).contact_number || q.client?.phonenumber || "—";
+    const fmtDate = (d?: string) =>
+      d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+
+    let y = 36;
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const ensureSpace = (needed: number) => {
+      if (y + needed > pageHeight - 20) {
+        doc.addPage();
+        y = 20;
+      }
+    };
+    // Truncates with an ellipsis so long client/project names never overlap the next column —
+    // must be called after setFont/setFontSize since getTextWidth depends on the active font.
+    const fitText = (text: string, maxW: number) => {
+      let t = String(text ?? "");
+      if (doc.getTextWidth(t) <= maxW) return t;
+      while (t.length > 1 && doc.getTextWidth(`${t}…`) > maxW) t = t.slice(0, -1);
+      return t.length > 1 ? `${t}…` : t;
+    };
+
+    // Meta bar — Quote Ref / Date / Valid Until
+    doc.setFillColor(243, 244, 246);
+    doc.rect(14, y, 182, 10, "F");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(90, 90, 90);
+    doc.text("QUOTE REF:", 17, y + 6.5);
+    doc.text("DATE:", 84, y + 6.5);
+    doc.text("VALID UNTIL:", 138, y + 6.5);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(20, 20, 20);
+    doc.text(fitText(q.number || "—", 47), 35, y + 6.5);
+    doc.text(fmtDate(q.date), 96, y + 6.5);
+    doc.text(fmtDate(q.valid_till), 160, y + 6.5);
+    y += 17;
+
+    // Client / project info grid
+    const infoCols = [
+      { label: "CLIENT NAME", value: clientName },
+      { label: "PROJECT / BUILDING", value: q.project_details?.project_building || "—" },
+      { label: "UNIT / FLAT NO.", value: q.project_details?.unit_no || "—" },
+      { label: "CONTACT NO.", value: clientPhone },
+    ];
+    const colX = [14, 62, 110, 152];
+    const colW = [44, 44, 38, 40]; // gap to the next column, minus a small gutter
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...primaryRgb);
+    infoCols.forEach((c, idx) => doc.text(fitText(c.label, colW[idx]), colX[idx], y));
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(20, 20, 20);
+    infoCols.forEach((c, idx) => doc.text(fitText(String(c.value), colW[idx]), colX[idx], y + 6));
+    doc.setFont("helvetica", "normal");
+    y += 11;
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, y, 196, y);
+    y += 6;
+
+    // Flat type banner
+    if (q.project_details?.flat_type) {
+      ensureSpace(13);
+      doc.setFillColor(...flatBg);
+      doc.rect(14, y, 182, 9, "F");
+      doc.setTextColor(...flatText);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.text(`FLAT TYPE: ${String(q.project_details.flat_type).toUpperCase()}`, 105, y + 6, { align: "center" });
+      doc.setFont("helvetica", "normal");
+      y += 15;
+    } else {
+      y += 4;
+    }
+
+    if (q.format === "pro" && q.rooms && q.rooms.length > 0) {
+      for (const room of q.rooms) {
+        ensureSpace(20);
+
+        doc.setFillColor(...roomBg);
+        doc.rect(14, y, 182, 9, "F");
+        doc.setTextColor(...headerTextRgb);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(11);
+        doc.text(String(room.name || "Room").toUpperCase(), 105, y + 6, { align: "center" });
+        doc.setFont("helvetica", "normal");
+        y += 9;
+
+        // Preload each item's photo (must happen before the synchronous didDrawCell hook runs).
+        const photoData: Record<number, LoadedImage | null> = {};
+        const roomItems = room.items || [];
+        const shouldIncludeImages = (q as any).show_item_images !== false;
+        for (let i = 0; i < roomItems.length; i++) {
+          const url = roomItems[i]?.photo_url || roomItems[i]?.photoUrl;
+          photoData[i] = (shouldIncludeImages && url) ? await loadImageAsDataUrl(url, { maxPx: 600, jpeg: true }) : null;
+        }
+
+        const roomHasAnyPhoto = roomItems.some((_, idx) => !!photoData[idx]);
+        const descHeaderLabel = roomHasAnyPhoto ? "PHOTO & DESCRIPTION" : "DESCRIPTION";
+
+        const body: any[] = [];
+        const photoRowIndex: Record<number, number> = {};
+
+        roomItems.forEach((it: any, itemIdx: number) => {
+          const priceStr = pdfCurrency(it.unit_price);
+          const totalStr = pdfCurrency(roomItemTotal(it));
+          const hasBreakdown = (it.sw || 0) + (it.fan || 0) + (it.soc || 0) + (it.mod || 0) > 0;
+          const hasPhoto = !!photoData[itemIdx];
+          const hasCaption = hasPhoto && !!it.description?.trim() && it.description.trim() !== (it.series || "").trim();
+
+          photoRowIndex[body.length] = itemIdx;
+          body.push([
+            { content: it.series || "—", styles: { fontStyle: "bold", valign: "middle" } },
+            {
+              content: hasPhoto ? "" : (it.description || "—"),
+              styles: {
+                minCellHeight: hasPhoto ? 24 : 10,
+                valign: "middle",
+                halign: hasPhoto ? "center" : "left",
+                fontSize: 8,
+              },
+            },
+            { content: String(it.qty || 0), styles: { halign: "center", valign: "middle" } },
+            { content: priceStr, styles: { halign: "center", valign: "middle" } },
+            { content: `${it.disc_percent || 0}%`, styles: { halign: "center", valign: "middle" } },
+            { content: totalStr, styles: { halign: "center", valign: "middle", fontStyle: "bold" } },
+          ]);
+
+          if (hasBreakdown) {
+            body.push([
+              { content: it.model_no || "—", rowSpan: 2, styles: { halign: "center", valign: "middle", fontStyle: "bold", fontSize: 7 } },
+              { content: "SWITCH", styles: { halign: "center", fontStyle: "bold", fontSize: 6.5, textColor: [90, 90, 90] } },
+              { content: "FAN", styles: { halign: "center", fontStyle: "bold", fontSize: 6.5, textColor: [90, 90, 90] } },
+              { content: "SOCKET", styles: { halign: "center", fontStyle: "bold", fontSize: 6.5, textColor: [90, 90, 90] } },
+              { content: "MODULE", styles: { halign: "center", fontStyle: "bold", fontSize: 6.5, textColor: [90, 90, 90] } },
+              { content: "", rowSpan: 2 },
+            ]);
+            body.push([
+              { content: String(it.sw || 0), styles: { halign: "center" } },
+              { content: String(it.fan || 0), styles: { halign: "center" } },
+              { content: String(it.soc || 0), styles: { halign: "center" } },
+              { content: String(it.mod || 0), styles: { halign: "center" } },
+            ]);
+          }
+
+          if (hasCaption) {
+            body.push([
+              { content: it.description, colSpan: 6, styles: { halign: "center", fontStyle: "italic", fontSize: 7, textColor: [130, 130, 130], fillColor: [250, 250, 250] } },
+            ]);
+          }
+        });
+
+        body.push([
+          { content: "TOTAL", colSpan: 5, styles: { halign: "right", fontStyle: "bold", fillColor: [238, 238, 238] } },
+          { content: pdfCurrency(roomTotal(room)), styles: { halign: "center", fontStyle: "bold", fillColor: [238, 238, 238] } },
+        ]);
+
+        autoTable(doc, {
+          startY: y,
+          head: [["SERIES", descHeaderLabel, "NOS", "PRICE", "DISCOUNT", "TOTAL"]],
+          body,
+          theme: "grid",
+          headStyles: { fillColor: primaryRgb, fontSize: 8, halign: "center" },
+          bodyStyles: { fontSize: 8 },
+          columnStyles: {
+            0: { cellWidth: 25 },
+            1: { cellWidth: "auto" },
+            2: { cellWidth: 15 },
+            3: { cellWidth: 25 },
+            4: { cellWidth: 20 },
+            5: { cellWidth: 25 },
+          },
+          margin: { left: 14, right: 14 },
+          didDrawCell: (data: any) => {
+            if (data.row.section !== "body" || data.column.index !== 1) return;
+            const itemIdx = photoRowIndex[data.row.index];
+            if (itemIdx === undefined) return;
+            const imgObj = photoData[itemIdx];
+            if (!imgObj) return;
+            try {
+              const pad = 2.5;
+              const maxW = data.cell.width - pad * 2;
+              const maxH = data.cell.height - pad * 2;
+              if (maxW <= 0 || maxH <= 0) return;
+              const ratio = Math.min(maxW / imgObj.width, maxH / imgObj.height);
+              const imgW = imgObj.width * ratio;
+              const imgH = imgObj.height * ratio;
+              const imgX = data.cell.x + (data.cell.width - imgW) / 2;
+              const imgY = data.cell.y + (data.cell.height - imgH) / 2;
+              doc.addImage(imgObj.dataUrl, imgObj.format, imgX, imgY, imgW, imgH);
+            } catch {
+              /* unsupported image format — skip embedding, PDF still generates */
+            }
+          },
+        });
+        y = (doc as any).lastAutoTable.finalY + 8;
+      }
+    } else {
+      const shouldIncludeImages = (q as any).show_item_images !== false;
+      const simpleItems = q.items || [];
+      const photoData: Record<number, LoadedImage | null> = {};
+      for (let i = 0; i < simpleItems.length; i++) {
+        const url = simpleItems[i]?.photo_url || (simpleItems[i] as any)?.photoUrl;
+        photoData[i] = (shouldIncludeImages && url) ? await loadImageAsDataUrl(url, { maxPx: 600, jpeg: true }) : null;
+      }
+
+      // Photo box drawn at the left of the description cell; the text is pushed right
+      // of it via left padding and the row is made tall enough to hold it.
+      const PHOTO_W = 18;
+      const PHOTO_H = 18;
+      const PHOTO_PAD = 2;
+      const hasAnyPhoto = simpleItems.some((_, idx) => !!photoData[idx]);
+      const tableData = simpleItems.map((item: any, index: number) => {
+        const hasPhoto = !!photoData[index];
+        const middle = hasPhoto ? { valign: "middle" as const } : {};
+        return [
+          { content: String(index + 1), styles: middle },
+          {
+            content: item.description || "—",
+            styles: hasPhoto
+              ? {
+                  minCellHeight: PHOTO_H + PHOTO_PAD * 2,
+                  valign: "middle" as const,
+                  cellPadding: { top: 2, right: 2, bottom: 2, left: PHOTO_W + PHOTO_PAD * 2 + 1 },
+                }
+              : {},
+          },
+          { content: String(item.qty || 0), styles: middle },
+          { content: pdfCurrency(item.rate), styles: middle },
+          { content: pdfCurrency((item.qty || 0) * (item.rate || 0)), styles: middle },
+        ];
+      });
+
+      autoTable(doc, {
+        startY: y,
+        head: [["#", hasAnyPhoto ? "Photo & Description" : "Description", "Qty", "Rate", "Amount"]],
+        body: tableData,
+        headStyles: { fillColor: primaryRgb },
+        columnStyles: {
+          0: { cellWidth: 10, halign: "center" },
+          1: { cellWidth: "auto" },
+          2: { cellWidth: 20, halign: "center" },
+          3: { cellWidth: 30, halign: "right" },
+          4: { cellWidth: 30, halign: "right" },
+        },
+        margin: { left: 14, right: 14 },
+        didDrawCell: (data: any) => {
+          if (data.row.section !== "body" || data.column.index !== 1) return;
+          const itemIdx = data.row.index;
+          const imgObj = photoData[itemIdx];
+          if (!imgObj) return;
+          try {
+            const ratio = Math.min(PHOTO_W / imgObj.width, PHOTO_H / imgObj.height);
+            const imgW = imgObj.width * ratio;
+            const imgH = imgObj.height * ratio;
+            const imgX = data.cell.x + PHOTO_PAD + (PHOTO_W - imgW) / 2;
+            const imgY = data.cell.y + (data.cell.height - imgH) / 2;
+            doc.addImage(imgObj.dataUrl, imgObj.format, imgX, imgY, imgW, imgH);
+          } catch {
+            /* ignore */
+          }
+        },
+      });
+      y = (doc as any).lastAutoTable.finalY + 8;
+    }
+
+    // Totals box
+    const hasDiscount = (q.discount_percent || 0) > 0;
+    ensureSpace(hasDiscount ? 50 : 40);
+    const boxX = 116;
+    const boxW = 80;
+
+    // Subtotal
+    doc.setFillColor(248, 248, 248);
+    doc.rect(boxX, y, boxW, 9, "F");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(60, 60, 60);
+    doc.text("Subtotal", boxX + 4, y + 6);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(20, 20, 20);
+    doc.text(pdfCurrency(q.subtotal), boxX + boxW - 4, y + 6, { align: "right" });
+    y += 9;
+
+    // Discount (if any)
+    if (hasDiscount) {
+      doc.setFillColor(248, 248, 248);
+      doc.rect(boxX, y, boxW, 9, "F");
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(220, 38, 38);
+      doc.text(`Discount (${q.discount_percent}%)`, boxX + 4, y + 6);
+      doc.setFont("helvetica", "bold");
+      doc.text(`-${pdfCurrency(q.discount_total || 0)}`, boxX + boxW - 4, y + 6, { align: "right" });
+      y += 9;
+    }
+
+    // GST
+    doc.setFillColor(248, 248, 248);
+    doc.rect(boxX, y, boxW, 9, "F");
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(60, 60, 60);
+    doc.text(`GST @ ${q.gst_percent ?? 18}%`, boxX + 4, y + 6);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(20, 20, 20);
+    doc.text(pdfCurrency(q.total_tax), boxX + boxW - 4, y + 6, { align: "right" });
+    y += 9;
+
+    // Grand Total
+    doc.setFillColor(...flatBg);
+    doc.rect(boxX, y, boxW, 11, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(...flatText);
+    doc.text("GRAND TOTAL", boxX + 4, y + 7.5);
+    doc.setTextColor(...primaryRgb);
+    doc.text(pdfCurrency(q.total), boxX + boxW - 4, y + 7.5, { align: "right" });
+    doc.setFont("helvetica", "normal");
+    y += 20;
+
+    // Terms & Conditions
+    if (q.notes) {
+      const lines = doc.splitTextToSize(q.notes, 182);
+      const minLinesToKeepWithHeading = Math.min(lines.length, 3);
+      const neededSpaceForHeader = 7 + 6 + (minLinesToKeepWithHeading * 4.5) + 6;
+      
+      ensureSpace(neededSpaceForHeader);
+      
+      doc.setDrawColor(220, 220, 220);
+      doc.line(14, y, 196, y);
+      y += 7;
+      
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(...primaryRgb);
+      doc.text("TERMS & CONDITIONS", 14, y);
+      y += 6;
+      
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(90, 90, 90);
+      
+      for (const line of lines) {
+        ensureSpace(5);
+        doc.text(line, 14, y);
+        y += 4.5;
+      }
+      y += 6;
+    }
+
+    // Payment / Bank Details — the specific account selected on this quotation.
+    // q.bank_detail is populated when it comes from the list/detail fetch; when
+    // downloading right after Save (unpopulated id string), fall back to the
+    // already-loaded bank details list to resolve it.
+    const selectedBankDetail = (q as any).bank_detail && typeof (q as any).bank_detail === "object"
+      ? (q as any).bank_detail
+      : bankDetails.find((b: any) => b._id === (q as any).bank_detail);
+
+    if (selectedBankDetail) {
+      ensureSpace(25);
+
+      doc.setDrawColor(220, 220, 220);
+      doc.line(14, y, 196, y);
+      y += 7;
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(...primaryRgb);
+      doc.text("PAYMENT / BANK DETAILS", 14, y);
+      y += 6;
+
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(20, 20, 20);
+      doc.text(selectedBankDetail.accountHolderName || "—", 14, y);
+      y += 4.5;
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(90, 90, 90);
+      doc.text(`Bank: ${selectedBankDetail.bankName || "—"}`, 14, y);
+      y += 4.5;
+      doc.text(`A/C No: ${selectedBankDetail.accountNumber || "—"}   IFSC: ${selectedBankDetail.ifscCode || "—"}`, 14, y);
+      y += 4.5;
+      if (selectedBankDetail.branch?.name) {
+        doc.text(`Branch: ${selectedBankDetail.branch.name}`, 14, y);
+        y += 4.5;
+      }
+      y += 4;
+    }
+
+    // Footer — company details + authorised signatory
+    ensureSpace(24);
+    doc.setDrawColor(220, 220, 220);
+    doc.line(14, y, 196, y);
+    y += 8;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(20, 20, 20);
+    doc.text(q.branding?.fullCompanyName || q.branding?.brandName || "", 14, y);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(90, 90, 90);
+    if (q.branding?.contactAddress) doc.text(q.branding.contactAddress, 14, y + 5);
+    if (q.branding?.defaultContactNumber) doc.text(q.branding.defaultContactNumber, 14, y + 10);
+
+    doc.setDrawColor(120, 120, 120);
+    doc.line(140, y + 8, 196, y + 8);
+    doc.setFontSize(8);
+    doc.setTextColor(90, 90, 90);
+    doc.text("Authorised Signatory", 168, y + 13, { align: "center" });
+
+    afterPages.forEach((img) => {
+      doc.addPage();
+      drawFullPageImage(img);
+    });
+
+    doc.save(`Quotation_${q.number || "Draft"}.pdf`);
+  };
+
+  const selectedClientLabel = customers.find((c: any) => c._id === clientId)?.company || "";
+
+  const activeItem = tabs.find((i) => i.id === activeTab);
+  const activeLabel = activeTab === "create" && editingId ? "Edit Quotation" : (activeItem?.label || "Quotations");
+  const moduleTitle = currentType?.name
+    ? `${activeLabel} ${currentType.name}`
+    : activeLabel;
+
+  const segBtnClass = (active: boolean) =>
+    `flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${active ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+    }`;
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6">
+        {/* Header */}
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{moduleTitle}</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            {activeTab === "dashboard" && "Overview of your quotation activity"}
+            {activeTab === "create" && (editingId ? "Update the details below to save changes to the quotation" : "Choose format and fill in the details below")}
+            {activeTab === "list" && "Browse and manage all quotations"}
+            {activeTab === "approvals" && "Quotations waiting for your approval"}
+          </p>
+        </div>
+
+        {/* Content Grid */}
+        <div className="flex flex-col md:flex-row gap-6">
+          {/* Sub Sidebar */}
+          <aside className="w-full md:w-64 shrink-0">
+            <Card className="border-none shadow-sm bg-card/50 backdrop-blur-sm sticky top-6">
+              <CardContent className="p-2 flex flex-col gap-1">
+                {tabs.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      if (item.id === "create" && editingId) resetForm();
+                      setActiveTab(item.id);
+                    }}
+                    className={
+                      "flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-md transition-all duration-200 text-left w-full " +
+                      (activeTab === item.id
+                        ? "bg-primary text-primary-foreground shadow-md scale-[1.02]"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground")
+                    }
+                  >
+                    <item.icon className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{item.id === "create" && editingId ? "Edit Quotation" : item.label}</span>
+                    {item.id === "approvals" && pendingApprovals.length > 0 && (
+                      <span className={`ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded-full ${activeTab === item.id ? "bg-white/25" : "bg-amber-100 text-amber-700"}`}>
+                        {pendingApprovals.length}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </CardContent>
+            </Card>
+          </aside>
+
+          {/* Main Content Area */}
+          <main className="flex-1 min-w-0 space-y-6">
+            {activeTab === "dashboard" && (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Card className="rounded-2xl border-border/50 shadow-sm">
+                    <CardContent className="p-6">
+                      <p className="text-sm text-muted-foreground mb-1">Total Quotations</p>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-3xl font-bold text-slate-900">{totalThisMonth}</span>
+                        <span className="text-xs text-muted-foreground">this month</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="rounded-2xl border-border/50 shadow-sm">
+                    <CardContent className="p-6">
+                      <p className="text-sm text-muted-foreground mb-1">Total Value</p>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-3xl font-bold text-slate-900">{formatValue(totalValue)}</span>
+                        <span className="text-xs text-muted-foreground">incl. GST</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="rounded-2xl border-border/50 shadow-sm">
+                    <CardContent className="p-6">
+                      <p className="text-sm text-muted-foreground mb-1">Accepted</p>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-3xl font-bold text-slate-900">{acceptedThisMonth}</span>
+                        <span className="text-xs text-muted-foreground">of {totalThisMonth}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <Card className="rounded-2xl border-border/50 shadow-sm overflow-hidden">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-6 py-4 border-b border-border/50">
+                    <h3 className="text-sm font-bold text-foreground">Recent Quotations</h3>
+                    <Button onClick={() => setActiveTab("create")} className="rounded-xl font-semibold gap-2">
+                      <Plus className="h-4 w-4" /> New Quotation
+                    </Button>
+                  </div>
+                  <CardContent className="p-0">
+                    {isLoading ? (
+                      <p className="text-sm text-muted-foreground italic text-center py-12">Loading quotations...</p>
+                    ) : recent.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-16 gap-2">
+                        <FileBarChart className="h-8 w-8 text-muted-foreground/40" />
+                        <p className="text-sm text-muted-foreground italic">No quotations yet.</p>
+                      </div>
+                    ) : (
+                        <Table className="min-w-[640px]">
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>#</TableHead>
+                              <TableHead>Client</TableHead>
+                              <TableHead>Date</TableHead>
+                              <TableHead>Amount</TableHead>
+                              <TableHead className="w-24"/>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {recent.map((q) => (
+                              <TableRow key={q._id}>
+                                <TableCell className="font-medium text-slate-700">{q.number}</TableCell>
+                                <TableCell>{q.client?.company || "—"}</TableCell>
+                                <TableCell className="text-muted-foreground">
+                                  {q.date ? new Date(q.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—"}
+                                </TableCell>
+                                <TableCell>₹{(q.total || 0).toLocaleString("en-IN")}</TableCell>
+                                <TableCell className="text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    <button onClick={() => handleDownloadPDF(q)} className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors" title="Download PDF">
+                                      <Download className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button onClick={() => handleEdit(q)} className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors" title="Edit">
+                                      <Edit className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button onClick={() => { if (window.confirm('Delete this quotation?')) deleteMutation.mutate(q._id) }} className="p-1.5 rounded-lg hover:red-50 text-muted-foreground hover:text-red-600 transition-colors">
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                    )}
+                  </CardContent>
+                </Card>
+              </>
+            )}
+
+            {activeTab === "create" && (
+              <div className="space-y-6">
+                {/* Format toggle + theme toggle bar */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Quotation Type</p>
+                    <p className="text-sm font-semibold">{currentType?.name || "General"}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {allowedFormat === "both" && (
+                      <div className="inline-flex rounded-xl border border-border/50 p-1 bg-muted/30">
+                        <button type="button" onClick={() => setFormat("simple")} className={segBtnClass(format === "simple")}>
+                          Simple
+                        </button>
+                        <button type="button" onClick={() => setFormat("pro")} className={segBtnClass(format === "pro")}>
+                          <Star className="h-3.5 w-3.5" /> Pro Format
+                        </button>
+                      </div>
+                    )}
+                    <Button type="button" variant="outline" size="sm" className="gap-2 rounded-xl" onClick={() => setShowThemeColors((v) => !v)}>
+                      <Palette className="h-3.5 w-3.5" /> {showThemeColors ? "Hide" : "Show"} Theme Colors
+                    </Button>
+                  </div>
+                </div>
+
+                {showThemeColors && (
+                  <Card className="rounded-2xl border-border/50 shadow-sm">
+                    <CardContent className="p-6 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-bold">PDF Theme Customization</h3>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="rounded-xl gap-2"
+                          onClick={() => setTheme(currentType?.theme ? { ...DEFAULT_THEME, ...currentType.theme } : DEFAULT_THEME)}
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" /> Reset to Defaults
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {THEME_FIELDS.map((f) => (
+                          <div key={f.key} className="space-y-1">
+                            <Label className="text-xs font-bold">{f.label}</Label>
+                            <p className="text-[11px] text-muted-foreground -mt-0.5">{f.hint}</p>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="color"
+                                value={theme[f.key]}
+                                onChange={(e) => setTheme((t) => ({ ...t, [f.key]: e.target.value }))}
+                                className="h-9 w-9 rounded border border-border/40 cursor-pointer shrink-0"
+                              />
+                              <Input
+                                value={theme[f.key]}
+                                onChange={(e) => setTheme((t) => ({ ...t, [f.key]: e.target.value }))}
+                                className="h-9 text-xs"
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
+                <Card className="rounded-2xl border-border/50 shadow-sm overflow-hidden">
+                  {/* Client & Project Details */}
+                  <div className="px-6 py-2.5 bg-blue-50 border-b border-blue-100">
+                    <span className="text-xs font-bold uppercase tracking-widest text-blue-700">Client &amp; Project Details</span>
+                  </div>
+                  <CardContent className="p-6 space-y-5">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                      {canUseBranch && (
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Branch</Label>
+                          <div className="space-y-1">
+                            <SearchableSelect
+                              placeholder="Select branch"
+                              options={branchesForType.map((b: any) => ({ value: idOf(b), label: b.name }))}
+                              value={selectedBranchId}
+                              onValueChange={(val) => { setSelectedBranchId(val); setClientId(""); }}
+                            />
+                            <button
+                              type="button"
+                              className="text-xs font-bold text-primary hover:underline"
+                              onClick={() => {
+                                const here = `${window.location.pathname}${window.location.search}`;
+                                navigate(`/admin/hrms/staff/branches/new?returnTo=${encodeURIComponent(here)}`);
+                              }}
+                            >
+                              + Add new branch
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Customer</Label>
+                        <div className="space-y-1">
+                          <SearchableSelect
+                            placeholder={!canUseBranch || selectedBranchId ? "Select customer" : "Select a branch first"}
+                            options={customersForType.map((c: any) => ({ value: c._id, label: c.company || "Unnamed customer" }))}
+                            value={clientId}
+                            onValueChange={setClientId}
+                            disabled={canUseBranch && !selectedBranchId}
+                          />
+                          {isPilot && (
+                            <button
+                              type="button"
+                              className="text-xs font-bold text-primary hover:underline"
+                              onClick={() => { setNewCustomerForm({ ...emptyNewCustomer, branch: selectedBranchId }); setIsAddingCustomer(true); }}
+                            >
+                              + Add new customer manually
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Quotation Date</Label>
+                        <Input type="date" value={quotationDate} onChange={(e) => setQuotationDate(e.target.value)} className="h-11" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Contact Number</Label>
+                        <Input
+                          type="tel"
+                          maxLength={10}
+                          placeholder="e.g. 9876543210"
+                          value={contactNumber}
+                          onChange={(e) => setContactNumber(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                          className="h-11"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Valid Until</Label>
+                        <Input type="date" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} className="h-11" />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Client Address</Label>
+                      <Textarea
+                        placeholder="Full address..."
+                        value={address}
+                        onChange={(e) => setAddress(e.target.value)}
+                        className="min-h-[90px]"
+                      />
+                    </div>
+
+                    {format === "pro" && (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-5 pt-2 border-t border-border/40">
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Project / Building</Label>
+                          <Input placeholder="e.g. Ramdut Heights" value={projectBuilding} onChange={(e) => setProjectBuilding(e.target.value)} className="h-11" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Unit No.</Label>
+                          <Input placeholder="e.g. A-402" value={unitNo} onChange={(e) => setUnitNo(e.target.value)} className="h-11" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Flat Type</Label>
+                          <Input placeholder="e.g. 2 BHK" value={flatType} onChange={(e) => setFlatType(e.target.value)} className="h-11" />
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+
+                  <Dialog open={isAddingCustomer} onOpenChange={setIsAddingCustomer}>
+                    <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                      <DialogHeader>
+                        <DialogTitle>Add New Customer</DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-4 pt-2">
+                        <div className="space-y-2">
+                          <Label>Company <span className="text-destructive">*</span></Label>
+                          <Input
+                            placeholder="Company name"
+                            value={newCustomerForm.company}
+                            onChange={(e) => setNewCustomerForm((f) => ({ ...f, company: e.target.value }))}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Branch</Label>
+                          <SearchableSelect
+                            placeholder="Select branch"
+                            options={branchesForType.map((b: any) => ({ value: idOf(b), label: b.name }))}
+                            value={newCustomerForm.branch}
+                            onValueChange={(val) => setNewCustomerForm((f) => ({ ...f, branch: val }))}
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>Customer Reference</Label>
+                            <Input
+                              placeholder="Customer reference"
+                              value={newCustomerForm.customer_reference}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, customer_reference: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Connect Person</Label>
+                            <Input
+                              placeholder="Contact person name"
+                              value={newCustomerForm.contact_person}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, contact_person: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>VAT Number</Label>
+                            <Input
+                              placeholder="VAT number"
+                              value={newCustomerForm.vat}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, vat: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Phone</Label>
+                            <Input
+                              type="tel"
+                              placeholder="+1 555-0100"
+                              maxLength={10}
+                              inputMode="numeric"
+                              value={newCustomerForm.phonenumber}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, phonenumber: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>Email</Label>
+                            <Input
+                              type="email"
+                              placeholder="company@example.com"
+                              value={newCustomerForm.email}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, email: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Website</Label>
+                            <Input
+                              type="url"
+                              placeholder="https://example.com"
+                              value={newCustomerForm.website}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, website: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>PAN Number</Label>
+                            <Input
+                              placeholder="PAN number"
+                              value={newCustomerForm.pan_number}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, pan_number: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>GST Number</Label>
+                            <Input
+                              placeholder="GST number"
+                              value={newCustomerForm.gst_number}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, gst_number: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Account Details</Label>
+                          <Textarea
+                            placeholder="Bank name, account number, IFSC, etc."
+                            rows={2}
+                            value={newCustomerForm.account_details}
+                            onChange={(e) => setNewCustomerForm((f) => ({ ...f, account_details: e.target.value }))}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Address</Label>
+                          <Textarea
+                            placeholder="Full address"
+                            rows={2}
+                            value={newCustomerForm.address}
+                            onChange={(e) => setNewCustomerForm((f) => ({ ...f, address: e.target.value }))}
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>City</Label>
+                            <Input
+                              placeholder="City"
+                              value={newCustomerForm.city}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, city: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>State</Label>
+                            <Input
+                              placeholder="State"
+                              value={newCustomerForm.state}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, state: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <Label>Zip Code</Label>
+                            <Input
+                              placeholder="Zip code"
+                              value={newCustomerForm.zip}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, zip: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Country</Label>
+                            <Input
+                              placeholder="Country"
+                              value={newCustomerForm.country}
+                              onChange={(e) => setNewCustomerForm((f) => ({ ...f, country: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="flex gap-2 pt-2">
+                          <Button
+                            className="flex-1"
+                            disabled={!newCustomerForm.company.trim() || createCustomerMutation.isPending}
+                            onClick={() => createCustomerMutation.mutate(newCustomerForm)}
+                          >
+                            {createCustomerMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                            Save
+                          </Button>
+                          <Button variant="outline" onClick={() => setIsAddingCustomer(false)}>Cancel</Button>
+                        </div>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
+
+                  {/* Logos & Branding */}
+                  <div className="px-6 py-2.5 bg-blue-50 border-y border-blue-100">
+                    <span className="text-xs font-bold uppercase tracking-widest text-blue-700">Logos &amp; Branding</span>
+                  </div>
+                  <CardContent className="p-6 space-y-6">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                          <Building2 className="h-3.5 w-3.5" /> Company / Brand Name
+                        </Label>
+                        <Input placeholder="e.g. TRINETRA" value={companyName} onChange={(e) => setCompanyName(e.target.value)} className="h-11" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-medium text-muted-foreground">Full Company Name</Label>
+                        <Input
+                          placeholder="Your Company Pvt. Ltd."
+                          value={fullCompanyName}
+                          onChange={(e) => setFullCompanyName(e.target.value)}
+                          className="h-11"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-medium text-muted-foreground">Tagline</Label>
+                        <Input
+                          placeholder="e.g. From innovation to infinity"
+                          value={tagline}
+                          onChange={(e) => setTagline(e.target.value)}
+                          className="h-11"
+                        />
+                      </div>
+                      <div className="space-y-1.5 md:col-span-2">
+                        <Label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                          <Phone className="h-3.5 w-3.5" /> Contact / Address
+                        </Label>
+                        <Textarea placeholder="Company contact address" value={brandAddress} onChange={(e) => setBrandAddress(e.target.value)} className="min-h-[44px]" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-medium text-muted-foreground">Default Contact Number</Label>
+                        <Input
+                          type="tel"
+                          maxLength={10}
+                          placeholder="e.g. 9876543210 (10 digits)"
+                          value={defaultContactNumber}
+                          onChange={(e) => setDefaultContactNumber(e.target.value.replace(/\D/g, "").slice(0, 10))}
+                          className="h-11"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Brand Logo</Label>
+                          {brandLogoUrl && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setBrandLogoUrl(null)}
+                              className="h-6 px-2 text-[11px] font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 gap-1 rounded-md"
+                            >
+                              <Trash2 className="h-3 w-3" /> Remove Logo
+                            </Button>
+                          )}
+                        </div>
+                        <div className="relative group">
+                          <label className="flex flex-col items-center justify-center gap-2 h-32 rounded-xl border-2 border-dashed border-border/60 cursor-pointer hover:border-primary/50 hover:bg-muted/30 transition-colors overflow-hidden">
+                            {uploadingKey === "brandLogo" ? (
+                              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                            ) : brandLogoUrl ? (
+                              <img src={resolveImageUrl(brandLogoUrl)} alt="Brand logo preview" className="h-full w-full object-contain p-3" onError={() => setBrandLogoUrl(null)} />
+                            ) : (
+                              <>
+                                <ImagePlus className="h-6 w-6 text-muted-foreground" />
+                                <span className="text-xs text-muted-foreground">Upload brand logo</span>
+                              </>
+                            )}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => handleBrandLogoPick(e.target.files?.[0])}
+                            />
+                          </label>
+                          {brandLogoUrl && (
+                            <button
+                              type="button"
+                              title="Remove Brand Logo"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setBrandLogoUrl(null);
+                              }}
+                              className="absolute top-2 right-2 p-1.5 rounded-full bg-red-600/90 hover:bg-red-600 text-white transition-opacity shadow-md z-10"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Client Logo</Label>
+                          {clientLogoUrl && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setClientLogoUrl(null)}
+                              className="h-6 px-2 text-[11px] font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 gap-1 rounded-md"
+                            >
+                              <Trash2 className="h-3 w-3" /> Remove Logo
+                            </Button>
+                          )}
+                        </div>
+                        <div className="relative group">
+                          <label className="flex flex-col items-center justify-center gap-2 h-32 rounded-xl border-2 border-dashed border-border/60 cursor-pointer hover:border-primary/50 hover:bg-muted/30 transition-colors overflow-hidden">
+                            {uploadingKey === "clientLogo" ? (
+                              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                            ) : clientLogoUrl ? (
+                              <img src={resolveImageUrl(clientLogoUrl)} alt="Client logo preview" className="h-full w-full object-contain p-3" onError={() => setClientLogoUrl(null)} />
+                            ) : (
+                              <>
+                                <ImagePlus className="h-6 w-6 text-muted-foreground" />
+                                <span className="text-xs text-muted-foreground">Upload client logo</span>
+                              </>
+                            )}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => handleClientLogoPick(e.target.files?.[0])}
+                            />
+                          </label>
+                          {clientLogoUrl && (
+                            <button
+                              type="button"
+                              title="Remove Client Logo"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                setClientLogoUrl(null);
+                              }}
+                              className="absolute top-2 right-2 p-1.5 rounded-full bg-red-600/90 hover:bg-red-600 text-white transition-opacity shadow-md z-10"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-blue-50/60 border border-blue-100">
+                      <div className="flex items-center gap-2">
+                        <Checkbox id="saveDefaults" checked={saveBrandingDefault} onCheckedChange={(c) => setSaveBrandingDefault(c as boolean)} />
+                        <Label htmlFor="saveDefaults" className="text-xs font-medium text-blue-800 cursor-pointer">
+                          Save branding details as default for future quotations
+                        </Label>
+                      </div>
+                      <div className="flex items-center gap-2 border-t sm:border-t-0 sm:border-l border-blue-200 pt-2 sm:pt-0 sm:pl-4">
+                        <Checkbox id="showItemImages" checked={showItemImages} onCheckedChange={(c) => setShowItemImages(c as boolean)} />
+                        <Label htmlFor="showItemImages" className="text-xs font-semibold text-blue-900 cursor-pointer">
+                          Include item photos in quotation output &amp; PDF
+                        </Label>
+                      </div>
+                    </div>
+                  </CardContent>
+
+                  {format === "simple" ? (
+                    <>
+                      {/* Items (Simple format) */}
+                      <div className="px-6 py-2.5 bg-blue-50 border-y border-blue-100">
+                        <span className="text-xs font-bold uppercase tracking-widest text-blue-700">Items — Description, Photo &amp; Pricing</span>
+                      </div>
+                      <CardContent className="p-6 space-y-4">
+                        <TableContainer>
+                          <Table className="min-w-[720px]">
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="w-8">#</TableHead>
+                                <TableHead>Description</TableHead>
+                                <TableHead className="w-24">Qty</TableHead>
+                                <TableHead className="w-32">Unit Price (₹)</TableHead>
+                                <TableHead className="w-32">Amount (₹)</TableHead>
+                                <TableHead className="w-8"/>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {items.map((item, idx) => (
+                                <TableRow key={item.id}>
+                                  <TableCell className="text-muted-foreground">{idx + 1}</TableCell>
+                                  <TableCell>
+                                    <div className="flex items-center gap-2">
+                                      <div className="relative group shrink-0">
+                                        <label
+                                          title="Upload or Change item photo"
+                                          className="flex flex-col items-center justify-center h-10 w-10 rounded-lg border border-dashed border-border/60 cursor-pointer hover:border-primary/50 overflow-hidden bg-background shrink-0 relative group"
+                                        >
+                                          {uploadingKey === `simple-${item.id}` ? (
+                                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                                          ) : item.photoUrl ? (
+                                            <>
+                                              <img src={resolveImageUrl(item.photoUrl)} alt="" className="h-full w-full object-cover" />
+                                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                                <Edit className="h-3 w-3 text-white" />
+                                              </div>
+                                            </>
+                                          ) : (
+                                            <ImagePlus className="h-4 w-4 text-muted-foreground" />
+                                          )}
+                                          <input
+                                            type="file"
+                                            accept="image/*"
+                                            className="hidden"
+                                            onChange={(e) => handleSimpleItemPhotoPick(item.id, e.target.files?.[0])}
+                                          />
+                                        </label>
+                                        {item.photoUrl && (
+                                          <button
+                                            type="button"
+                                            title="Remove Image"
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              updateItem(item.id, "photoUrl", "");
+                                            }}
+                                            className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-red-600 text-white flex items-center justify-center hover:bg-red-700 shadow transition-colors z-10"
+                                          >
+                                            <X className="h-2.5 w-2.5" />
+                                          </button>
+                                        )}
+                                      </div>
+                                      <Input
+                                        placeholder="Item description..."
+                                        value={item.description}
+                                        onChange={(e) => updateItem(item.id, "description", e.target.value)}
+                                        className="h-10 flex-1"
+                                      />
+                                    </div>
+                                  </TableCell>
+                                  <TableCell>
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      value={item.qty}
+                                      onChange={(e) => updateItem(item.id, "qty", Number(e.target.value))}
+                                      className="h-10"
+                                    />
+                                  </TableCell>
+                                  <TableCell>
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      step="0.01"
+                                      value={item.rate}
+                                      onChange={(e) => updateItem(item.id, "rate", Number(e.target.value))}
+                                      className="h-10"
+                                    />
+                                  </TableCell>
+                                  <TableCell className="font-semibold text-slate-700">
+                                    {(Number(item.qty) * Number(item.rate) || 0).toFixed(2)}
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    <button
+                                      onClick={() => removeItemRow(item.id)}
+                                      className="p-1.5 rounded-lg text-muted-foreground hover:text-red-600 hover:bg-red-50 transition-colors"
+                                    >
+                                      <X className="h-4 w-4" />
+                                    </button>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+
+                        <Button variant="outline" size="sm" onClick={addItemRow} className="gap-2 rounded-xl">
+                          <Plus className="h-3.5 w-3.5" /> Add item
+                        </Button>
+                      </CardContent>
+                    </>
+                  ) : (
+                    <>
+                      {/* Rooms & Items (Pro format) */}
+                      <div className="px-6 py-2.5 bg-blue-50 border-y border-blue-100">
+                        <span className="text-xs font-bold uppercase tracking-widest text-blue-700">Rooms &amp; Items</span>
+                      </div>
+                      <CardContent className="p-6 space-y-5">
+                        {rooms.map((room) => (
+                          <div key={room.id} className="rounded-xl border border-border/50 overflow-hidden">
+                            <div
+                              className="flex items-center justify-between px-4 py-3"
+                              style={{ background: `${theme.roomHeaderBg}1a` }}
+                            >
+                              <Input
+                                value={room.name}
+                                onChange={(e) => updateRoomName(room.id, e.target.value)}
+                                className="h-9 max-w-xs font-bold uppercase tracking-wide bg-transparent border-none focus-visible:ring-1 px-2"
+                              />
+                              <Button variant="outline" size="sm" className="rounded-lg" onClick={() => removeRoom(room.id)}>
+                                Remove Room
+                              </Button>
+                            </div>
+
+                            <div className="p-4 space-y-4">
+                              {room.items.map((it) => (
+                                <div key={it.id} className="rounded-lg border border-border/40 p-4 space-y-3">
+                                  <div className="flex items-start gap-3">
+                                    <div className="relative group shrink-0">
+                                      <label
+                                        title="Upload or Change item photo"
+                                        className="flex flex-col items-center justify-center gap-1 h-16 w-16 rounded-lg border-2 border-dashed border-border/60 cursor-pointer hover:border-primary/50 transition-colors overflow-hidden relative group"
+                                      >
+                                        {uploadingKey === `room-${room.id}-${it.id}` ? (
+                                          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                        ) : it.photoUrl ? (
+                                          <>
+                                            <img src={resolveImageUrl(it.photoUrl)} alt="" className="h-full w-full object-cover" />
+                                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity">
+                                              <Edit className="h-4 w-4 text-white" />
+                                              <span className="text-[9px] text-white font-medium">Edit</span>
+                                            </div>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Plus className="h-4 w-4 text-muted-foreground" />
+                                            <span className="text-[10px] text-muted-foreground">Photo</span>
+                                          </>
+                                        )}
+                                        <input
+                                          type="file"
+                                          accept="image/*"
+                                          className="hidden"
+                                          onChange={(e) => handleRoomItemPhotoPick(room.id, it.id, e.target.files?.[0])}
+                                        />
+                                      </label>
+                                      {it.photoUrl && (
+                                        <button
+                                          type="button"
+                                          title="Remove Image"
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            updateRoomItem(room.id, it.id, "photoUrl", "");
+                                          }}
+                                          className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-red-600 text-white flex items-center justify-center hover:bg-red-700 shadow transition-colors z-10"
+                                        >
+                                          <X className="h-3 w-3" />
+                                        </button>
+                                      )}
+                                    </div>
+                                    <div className="flex-1 space-y-1.5">
+                                      <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Description</Label>
+                                      <Input
+                                        placeholder="What are we installing?"
+                                        value={it.description}
+                                        onChange={(e) => updateRoomItem(room.id, it.id, "description", e.target.value)}
+                                        className="h-10"
+                                      />
+                                    </div>
+                                    <button
+                                      onClick={() => removeRoomItem(room.id, it.id)}
+                                      className="p-1.5 rounded-lg text-muted-foreground hover:text-red-600 hover:bg-red-50 transition-colors shrink-0"
+                                    >
+                                      <X className="h-4 w-4" />
+                                    </button>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Series</Label>
+                                      <Input placeholder="e.g. Zen" value={it.series} onChange={(e) => updateRoomItem(room.id, it.id, "series", e.target.value)} className="h-9" />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Model No.</Label>
+                                      <Input placeholder="e.g. ZN-01" value={it.model_no} onChange={(e) => updateRoomItem(room.id, it.id, "model_no", e.target.value)} className="h-9" />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Unit Price</Label>
+                                      <Input type="number" min={0} value={it.unit_price} onChange={(e) => updateRoomItem(room.id, it.id, "unit_price", Number(e.target.value))} className="h-9" />
+                                    </div>
+                                  </div>
+
+                                  <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+                                    {(["sw", "fan", "soc", "mod"] as const).map((f) => (
+                                      <div key={f} className="space-y-1">
+                                        <Label className="text-[11px] font-bold uppercase text-muted-foreground">{f}</Label>
+                                        <Input type="number" min={0} value={it[f]} onChange={(e) => updateRoomItem(room.id, it.id, f, Number(e.target.value))} className="h-9" />
+                                      </div>
+                                    ))}
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Qty</Label>
+                                      <Input type="number" min={0} value={it.qty} onChange={(e) => updateRoomItem(room.id, it.id, "qty", Number(e.target.value))} className="h-9" />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-[11px] font-bold uppercase text-muted-foreground">Disc%</Label>
+                                      <Input type="number" min={0} max={100} value={it.disc_percent} onChange={(e) => updateRoomItem(room.id, it.id, "disc_percent", Number(e.target.value))} className="h-9" />
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-muted/30 text-sm">
+                                    <span className="font-medium text-muted-foreground">Estimated Item Total Amount</span>
+                                    <span className="font-bold text-primary">₹{roomItemTotal(it).toFixed(2)}</span>
+                                  </div>
+                                </div>
+                              ))}
+
+                              <Button variant="outline" size="sm" className="gap-2 rounded-xl" onClick={() => addItemToRoom(room.id)}>
+                                <Plus className="h-3.5 w-3.5" /> Add Item to {room.name.toUpperCase()}
+                              </Button>
+
+                              <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-muted/50 text-sm font-bold">
+                                <span>Room Total</span>
+                                <span>₹{roomTotal(room).toFixed(2)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+
+                        <Button variant="outline" className="w-full gap-2 rounded-xl border-dashed" onClick={addRoom}>
+                          <Home className="h-4 w-4" /> Add New Room Section
+                        </Button>
+                      </CardContent>
+                    </>
+                  )}
+
+                  {/* Notes & Summary */}
+                  <div className="px-6 py-2.5 bg-blue-50 border-y border-blue-100">
+                    <span className="text-xs font-bold uppercase tracking-widest text-blue-700">Notes &amp; Summary</span>
+                  </div>
+                  <CardContent className="p-6 space-y-6">
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                      <div className="lg:col-span-2 space-y-1.5">
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Notes / Terms &amp; Conditions</Label>
+                        <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} className="min-h-[140px] text-sm" />
+                      </div>
+
+                      {canUseBankDetails && (
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Bank Details</Label>
+                          <Select value={bankDetailId || "none"} onValueChange={(v) => setBankDetailId(v === "none" ? "" : v)}>
+                            <SelectTrigger className="h-10 rounded-xl">
+                              <SelectValue placeholder="Select Bank Account" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">None</SelectItem>
+                              {activeBankDetails.map((bd: any) => (
+                                <SelectItem key={bd._id} value={bd._id}>
+                                  {bd.bankName} — {bd.accountNumber}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      )}
+
+                      {format === "pro" && (
+                        <div className="space-y-3">
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
+                            Quotation Attachments (Full Page Images)
+                          </Label>
+                          <div className="space-y-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">Images BEFORE Quotation ({beforeImages.length} Pages)</p>
+                            <div className="flex flex-wrap gap-2">
+                              {beforeImages.map((url, i) => (
+                                <div key={i} className="relative h-16 w-16 rounded-lg overflow-hidden border border-border/40">
+                                  <img src={url} alt="" className="h-full w-full object-cover" />
+                                  <button
+                                    onClick={() => setBeforeImages((prev) => prev.filter((_, idx) => idx !== i))}
+                                    className="absolute top-0 right-0 bg-black/60 text-white rounded-bl p-0.5"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              ))}
+                              <label className="flex flex-col items-center justify-center h-16 w-16 rounded-lg border-2 border-dashed border-border/60 cursor-pointer hover:border-primary/50 transition-colors">
+                                <Plus className="h-4 w-4 text-muted-foreground" />
+                                <span className="text-[9px] text-muted-foreground">Add Image</span>
+                                <input type="file" accept="image/*" className="hidden" onChange={(e) => handleAddBeforeImage(e.target.files?.[0])} />
+                              </label>
+                            </div>
+                          </div>
+                          <div className="space-y-1.5">
+                            <p className="text-xs font-medium text-muted-foreground">Images AFTER Quotation ({afterImages.length} Pages)</p>
+                            <div className="flex flex-wrap gap-2">
+                              {afterImages.map((url, i) => (
+                                <div key={i} className="relative h-16 w-16 rounded-lg overflow-hidden border border-border/40">
+                                  <img src={url} alt="" className="h-full w-full object-cover" />
+                                  <button
+                                    onClick={() => setAfterImages((prev) => prev.filter((_, idx) => idx !== i))}
+                                    className="absolute top-0 right-0 bg-black/60 text-white rounded-bl p-0.5"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              ))}
+                              <label className="flex flex-col items-center justify-center h-16 w-16 rounded-lg border-2 border-dashed border-border/60 cursor-pointer hover:border-primary/50 transition-colors">
+                                <Plus className="h-4 w-4 text-muted-foreground" />
+                                <span className="text-[9px] text-muted-foreground">Add Image</span>
+                                <input type="file" accept="image/*" className="hidden" onChange={(e) => handleAddAfterImage(e.target.files?.[0])} />
+                              </label>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">Subtotal</span>
+                          <span className="font-medium">₹{subtotal.toFixed(2)}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">Discount (%)</span>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={discountPercent}
+                            onChange={(e) => setDiscountPercent(Math.min(100, Math.max(0, Number(e.target.value) || 0)))}
+                            className="h-8 w-20 text-center"
+                          />
+                        </div>
+                        {discountPercent > 0 && (
+                          <div className="flex items-center justify-between text-sm text-destructive font-medium">
+                            <span>Discount Amount</span>
+                            <span>-₹{discountAmount.toFixed(2)}</span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground">GST Rate (%)</span>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={gstPercent}
+                            onChange={(e) => setGstPercent(Number(e.target.value))}
+                            className="h-8 w-20 text-center"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between pt-2 border-t border-border/40">
+                          <span className="font-bold">Grand Total</span>
+                          <span className="font-bold text-primary text-lg">₹{grandTotal.toFixed(2)}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex flex-wrap items-center justify-end gap-3 pt-4 border-t border-border/40">
+                      <Button
+                        variant="ghost"
+                        className="rounded-xl font-semibold"
+                        disabled={createMutation.isPending || updateMutation.isPending}
+                        onClick={() => {
+                          resetForm();
+                          setActiveTab("dashboard");
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="rounded-xl font-semibold gap-2 border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                        disabled={createMutation.isPending || updateMutation.isPending}
+                        onClick={handleSaveDraft}
+                      >
+                        <FileText className="h-4 w-4" />
+                        Save as Draft
+                      </Button>
+                      {approvalOn && !canApprove ? (
+                        <Button
+                          variant="outline"
+                          className="rounded-xl font-semibold gap-2"
+                          disabled={createMutation.isPending || updateMutation.isPending || requestApprovalMutation.isPending}
+                          onClick={handleSaveAndRequestApproval}
+                        >
+                          {requestApprovalMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                          {editingId ? "Update & Request Approval" : "Save & Request Approval"}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          className="rounded-xl font-semibold gap-2"
+                          disabled={createMutation.isPending || updateMutation.isPending}
+                          onClick={handleSaveAndDownload}
+                        >
+                          {(createMutation.isPending || updateMutation.isPending) && (createMutation.variables === "draft" || updateMutation.variables === "draft") ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                          {editingId ? "Update & Download PDF" : "Save & Download PDF"}
+                        </Button>
+                      )}
+                      <Button
+                        className="rounded-xl font-semibold gap-2"
+                        disabled={createMutation.isPending || updateMutation.isPending}
+                        onClick={handlePreviewAndSave}
+                      >
+                        <Eye className="h-4 w-4" />
+                        {editingId ? "Preview & Update" : "Preview & Save Quotation"}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {activeTab === "list" && (
+              <Card className="rounded-2xl border-border/50 shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-border/50">
+                  <h3 className="text-sm font-bold text-foreground">All Quotations</h3>
+                  <Button onClick={() => setActiveTab("create")} className="rounded-xl font-semibold gap-2">
+                    <Plus className="h-4 w-4" /> New Quotation
+                  </Button>
+                </div>
+                <CardContent className="p-0">
+                  {isLoadingList ? (
+                    <p className="text-sm text-muted-foreground italic text-center py-12">Loading all quotations...</p>
+                  ) : quotationsList.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 gap-2">
+                      <FileBarChart className="h-8 w-8 text-muted-foreground/40" />
+                      <p className="text-sm text-muted-foreground italic">No quotations found.</p>
+                    </div>
+                  ) : (
+                      <Table className="whitespace-nowrap">
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>#</TableHead>
+                            <TableHead>Client</TableHead>
+                            <TableHead>Format</TableHead>
+                            <TableHead>Date</TableHead>
+                            <TableHead>Items</TableHead>
+                            <TableHead>Amount</TableHead>
+                            <TableHead>Grand Total</TableHead>
+                            <TableHead>Status</TableHead>
+                            {canUseBankDetails && <TableHead>Bank Details</TableHead>}
+                            <TableHead className="w-24 text-right">Actions</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {quotationsList.map((q) => (
+                            <TableRow key={q._id}>
+                              <TableCell className="font-medium text-slate-700">{q.number || "—"}</TableCell>
+                              <TableCell className="font-medium">{q.client?.company || "—"}</TableCell>
+                              <TableCell>
+                                <span className={`text-[10px] font-bold uppercase px-2 py-1 rounded-full ${q.format === "pro" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
+                                  {q.format || "simple"}
+                                </span>
+                              </TableCell>
+                              <TableCell className="text-muted-foreground">
+                                {q.date ? new Date(q.date).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—"}
+                              </TableCell>
+                              <TableCell className="text-muted-foreground">
+                                {q.format === "pro" ? (q.rooms || []).reduce((s, r: any) => s + (r.items?.length || 0), 0) : q.items?.length || 0}
+                              </TableCell>
+                              <TableCell>₹{(q.subtotal || 0).toLocaleString("en-IN")}</TableCell>
+                              <TableCell className="font-medium">₹{(q.total || 0).toLocaleString("en-IN")}</TableCell>
+                              <TableCell>
+                                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full capitalize ${STATUS_STYLES[q.status?.toLowerCase()] || "bg-gray-100 text-gray-600"}`}>
+                                  {q.status || "Draft"}
+                                </span>
+                                {approvalOn && q.approval?.status && APPROVAL_BADGES[q.approval.status] && (
+                                  <div className="mt-1.5">
+                                    <span
+                                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${APPROVAL_BADGES[q.approval.status].cls}`}
+                                      title={q.approval.status === "rejected" && q.approval.comment ? `Reason: ${q.approval.comment}` : undefined}
+                                    >
+                                      {APPROVAL_BADGES[q.approval.status].label}
+                                    </span>
+                                    {q.approval.status === "rejected" && q.approval.comment && (
+                                      <p className="text-[11px] text-red-600 mt-1 max-w-[220px] truncate" title={q.approval.comment}>
+                                        Reason: {q.approval.comment}
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
+                              </TableCell>
+                              {canUseBankDetails && (
+                                <TableCell className="text-muted-foreground">
+                                  {(q as any).bank_detail ? `${(q as any).bank_detail.bankName || ""} — ${(q as any).bank_detail.accountNumber || ""}` : "-"}
+                                </TableCell>
+                              )}
+                              <TableCell className="text-right">
+                                <div className="flex items-center justify-end gap-1">
+                                  {approvalOn && !canApprove && (q.approval?.status === "none" || q.approval?.status === "rejected") && (
+                                    <button
+                                      onClick={() => requestApprovalMutation.mutate(q._id)}
+                                      disabled={approvalBusy}
+                                      className="p-1.5 rounded-lg hover:bg-amber-50 text-muted-foreground hover:text-amber-700 transition-colors disabled:opacity-50"
+                                      title="Request approval"
+                                    >
+                                      <Send className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  {canApprove && q.approval?.status && q.approval.status !== "approved" && (
+                                    <button
+                                      onClick={() => approveMutation.mutate(q._id)}
+                                      disabled={approvalBusy}
+                                      className="p-1.5 rounded-lg hover:bg-green-50 text-muted-foreground hover:text-green-700 transition-colors disabled:opacity-50"
+                                      title="Approve"
+                                    >
+                                      <CheckCircle2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  {canApprove && q.approval?.status === "pending" && (
+                                    <button
+                                      onClick={() => handleReject(q._id)}
+                                      disabled={approvalBusy}
+                                      className="p-1.5 rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition-colors disabled:opacity-50"
+                                      title="Reject"
+                                    >
+                                      <XCircle className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  {approvalOn && q.approval?.status && (
+                                    <button
+                                      onClick={() => setHistoryFor(q)}
+                                      className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors"
+                                      title="Approval history"
+                                    >
+                                      <HistoryIcon className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => handleDownloadPDF(q)}
+                                    className={`p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors ${!isCleared(q) && !canApprove ? "opacity-40" : ""}`}
+                                    title={!isCleared(q) && !canApprove ? "Download PDF (needs approval first)" : "Download PDF"}
+                                  >
+                                    <Download className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button onClick={() => handleEdit(q)} className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors" title="Edit">
+                                    <Edit className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button onClick={() => { if (window.confirm('Delete this quotation?')) deleteMutation.mutate(q._id) }} className="p-1.5 rounded-lg hover:bg-red-50 text-muted-foreground hover:text-red-600 transition-colors" title="Delete">
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                  )}
+
+                  {/* Pagination Footer */}
+                  <div className="flex flex-col md:flex-row md:items-center border-t bg-muted/30">
+                    <div className="flex items-center gap-3 px-6 pt-4 md:pt-0">
+                      <span className="text-xs font-bold text-muted-foreground whitespace-nowrap">Rows per page</span>
+                      <Select value={itemsPerPage} onValueChange={(v) => { setItemsPerPage(v); setCurrentPage(1); }}>
+                        <SelectTrigger className="h-9 w-[80px] bg-background border-none shadow-sm rounded-lg text-xs font-bold">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {["10", "25", "50", "100", "All"].map((v) => (
+                            <SelectItem key={v} value={v}>{v}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <TablePagination
+                      className="flex-1 border-t-0 bg-transparent"
+                      page={safeQuotationsPage}
+                      pageSize={quotationsPageSize}
+                      total={totalQuotations}
+                      onPageChange={setCurrentPage}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {activeTab === "approvals" && canApprove && (
+              <Card className="rounded-2xl border-border/50 shadow-sm overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-border/50">
+                  <h3 className="text-sm font-bold text-foreground">Awaiting Approval</h3>
+                  <span className="text-xs text-muted-foreground">{pendingApprovals.length} pending</span>
+                </div>
+                <CardContent className="p-0">
+                  {isLoadingApprovals ? (
+                    <p className="text-sm text-muted-foreground italic text-center py-12">Loading...</p>
+                  ) : pendingApprovals.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 gap-2">
+                      <ShieldCheck className="h-8 w-8 text-muted-foreground/40" />
+                      <p className="text-sm text-muted-foreground italic">Nothing waiting for approval.</p>
+                    </div>
+                  ) : (
+                    <Table className="whitespace-nowrap">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>#</TableHead>
+                          <TableHead>Client</TableHead>
+                          <TableHead>Type</TableHead>
+                          <TableHead>Requested By</TableHead>
+                          <TableHead>Requested On</TableHead>
+                          <TableHead>Grand Total</TableHead>
+                          <TableHead className="text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {pendingApprovals.map((q) => {
+                          const by = q.approval?.requested_by;
+                          const byName = by ? [by.firstname, by.lastname].filter(Boolean).join(" ") || by.email : "—";
+                          return (
+                            <TableRow key={q._id}>
+                              <TableCell className="font-medium text-slate-700">{q.number || "—"}</TableCell>
+                              <TableCell className="font-medium">{q.client?.company || "—"}</TableCell>
+                              <TableCell className="text-muted-foreground">{q.quotation_type?.name || "—"}</TableCell>
+                              <TableCell>{byName}</TableCell>
+                              <TableCell className="text-muted-foreground">
+                                {q.approval?.requested_at ? new Date(q.approval.requested_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—"}
+                              </TableCell>
+                              <TableCell className="font-medium">₹{(q.total || 0).toLocaleString("en-IN")}</TableCell>
+                              <TableCell className="text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button onClick={() => handleDownloadPDF(q)} className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors" title="View PDF">
+                                    <Download className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button onClick={() => handleEdit(q)} className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors" title="Open">
+                                    <Eye className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button onClick={() => setHistoryFor(q)} className="p-1.5 rounded-lg hover:bg-muted/60 text-muted-foreground hover:text-primary transition-colors" title="Approval history">
+                                    <HistoryIcon className="h-3.5 w-3.5" />
+                                  </button>
+                                  <Button size="sm" variant="outline" disabled={approvalBusy} onClick={() => handleReject(q._id)} className="h-8 rounded-lg gap-1 text-red-600 border-red-200 hover:bg-red-50">
+                                    <XCircle className="h-3.5 w-3.5" /> Reject
+                                  </Button>
+                                  <Button size="sm" disabled={approvalBusy} onClick={() => approveMutation.mutate(q._id)} className="h-8 rounded-lg gap-1">
+                                    <CheckCircle2 className="h-3.5 w-3.5" /> Approve
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+          </main>
+        </div>
+      </div>
+
+      <Dialog open={!!historyFor} onOpenChange={(open) => { if (!open) setHistoryFor(null); }}>
+        <DialogContent className="sm:max-w-[480px] p-0 overflow-hidden rounded-2xl max-h-[80vh] flex flex-col">
+          <DialogHeader className="px-6 py-4 border-b bg-muted/30 flex-shrink-0">
+            <DialogTitle className="text-lg font-semibold flex items-center gap-2">
+              <HistoryIcon className="h-4 w-4" /> Approval History — {historyFor?.number}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="p-6 overflow-y-auto flex-1">
+            {isLoadingHistory ? (
+              <p className="text-sm text-muted-foreground italic text-center py-6">Loading...</p>
+            ) : !historyData?.history?.length ? (
+              <p className="text-sm text-muted-foreground italic text-center py-6">No approval steps recorded yet.</p>
+            ) : (
+              <ol className="relative border-l border-border ml-2 space-y-5">
+                {historyData.history.map((h: any, idx: number) => {
+                  const meta = HISTORY_LABELS[h.action] || { label: h.action, cls: "bg-gray-400" };
+                  const who = h.by ? [h.by.firstname, h.by.lastname].filter(Boolean).join(" ") || h.by.email : "—";
+                  return (
+                    <li key={idx} className="ml-5">
+                      <span className={`absolute -left-[5px] mt-1.5 h-2.5 w-2.5 rounded-full ${meta.cls}`} />
+                      <p className="text-sm font-semibold">{meta.label}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {who} · {h.at ? new Date(h.at).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}
+                      </p>
+                      {h.comment && <p className="text-xs mt-1 text-slate-700">"{h.comment}"</p>}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <QuotationPreviewDialog
+        open={isPreviewOpen}
+        onOpenChange={setIsPreviewOpen}
+        onConfirm={handleConfirmPreviewSave}
+        isSaving={createMutation.isPending}
+        format={format}
+        companyName={companyName}
+        tagline={tagline}
+        brandLogoUrl={brandLogoUrl}
+        clientLogoUrl={clientLogoUrl}
+        clientLabel={selectedClientLabel}
+        contactNumber={contactNumber || defaultContactNumber}
+        address={address}
+        quotationDate={quotationDate}
+        validUntil={validUntil}
+        items={items}
+        rooms={rooms}
+        subtotal={subtotal}
+        discountPercent={discountPercent}
+        discountAmount={discountAmount}
+        gstPercent={gstPercent}
+        gstAmount={gstAmount}
+        grandTotal={grandTotal}
+        showItemImages={showItemImages}
+      />
+    </DashboardLayout>
+  );
+}
+
+function QuotationPreviewDialog({
+  open,
+  onOpenChange,
+  onConfirm,
+  isSaving,
+  format,
+  companyName,
+  tagline,
+  brandLogoUrl,
+  clientLogoUrl,
+  clientLabel,
+  contactNumber,
+  address,
+  quotationDate,
+  validUntil,
+  items,
+  rooms,
+  subtotal,
+  discountPercent,
+  discountAmount,
+  gstPercent,
+  gstAmount,
+  grandTotal,
+  showItemImages = true,
+}: any) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[640px] p-0 overflow-hidden rounded-2xl max-h-[85vh] flex flex-col">
+        <DialogHeader className="px-6 py-4 border-b bg-muted/30 flex-shrink-0">
+          <DialogTitle className="text-lg font-semibold">Quotation Preview</DialogTitle>
+        </DialogHeader>
+
+        <div className="p-6 space-y-6 overflow-y-auto flex-1">
+          {/* Letterhead */}
+          <div className="flex items-center justify-between pb-4 border-b border-border/40">
+            <div className="flex items-center gap-3">
+              {brandLogoUrl && <img src={resolveImageUrl(brandLogoUrl)} alt="Brand" className="h-10 w-10 object-contain rounded" onError={(e) => { e.currentTarget.style.display = 'none'; }} />}
+              <div>
+                <p className="font-bold text-slate-900">{companyName || "Your Company"}</p>
+                {tagline && <p className="text-xs text-muted-foreground">{tagline}</p>}
+              </div>
+            </div>
+            {clientLogoUrl && <img src={resolveImageUrl(clientLogoUrl)} alt="Client" className="h-10 w-10 object-contain rounded" onError={(e) => { e.currentTarget.style.display = 'none'; }} />}
+          </div>
+
+          {/* Client info */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+            <div>
+              <p className="text-xs text-muted-foreground uppercase tracking-widest mb-0.5">Client</p>
+              <p className="font-medium">{clientLabel || "—"}</p>
+              {contactNumber ? (
+                <WhatsAppQuickChat phone={contactNumber} data={{ customer_name: clientLabel }} />
+              ) : (
+                <p className="text-muted-foreground">—</p>
+              )}
+              <p className="text-muted-foreground">{address || "—"}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground uppercase tracking-widest mb-0.5">Date</p>
+              <p className="font-medium">{quotationDate}</p>
+              <p className="text-xs text-muted-foreground uppercase tracking-widest mt-2 mb-0.5">Valid Until</p>
+              <p className="font-medium">{validUntil}</p>
+            </div>
+          </div>
+
+          {/* Items */}
+          {format === "simple" ? (
+            <table className="w-full text-sm table-layout-fixed border-collapse">
+              <thead>
+                <tr className="border-b border-border/45 text-left text-xs text-muted-foreground uppercase tracking-widest bg-muted/20">
+                  <th className="py-2.5 px-4 text-left">Description</th>
+                  <th className="py-2.5 px-4 text-right w-20">Qty</th>
+                  <th className="py-2.5 px-4 text-right w-28">Rate</th>
+                  <th className="py-2.5 px-4 text-right w-32">Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/20">
+                {items
+                  .filter((i: ItemRow) => i.description.trim())
+                  .map((i: ItemRow) => (
+                    <tr key={i.id} className="hover:bg-muted/10 transition-colors">
+                      <td className="py-3 px-4 align-middle">
+                        <div className="flex items-center gap-2">
+                          {showItemImages && (i.photoUrl || (i as any).photo_url) && (
+                            <img src={resolveImageUrl(i.photoUrl || (i as any).photo_url)} alt="" className="h-7 w-7 rounded object-cover border shrink-0" />
+                          )}
+                          <span className="break-all whitespace-pre-wrap min-w-0 flex-1 text-slate-800">{i.description}</span>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 text-right align-middle text-slate-600">{i.qty}</td>
+                      <td className="py-3 px-4 text-right align-middle text-slate-600">₹{Number(i.rate).toFixed(2)}</td>
+                      <td className="py-3 px-4 text-right align-middle font-semibold text-slate-800">₹{(i.qty * i.rate).toFixed(2)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="space-y-4">
+              {rooms.map((room: Room) => (
+                <div key={room.id}>
+                  <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-1.5">{room.name}</p>
+                  <table className="w-full text-sm table-layout-fixed border-collapse">
+                    <thead>
+                      <tr className="border-b border-border/45 text-left text-xs text-muted-foreground uppercase tracking-widest bg-muted/20">
+                        <th className="py-2.5 px-4 text-left">Description</th>
+                        <th className="py-2.5 px-4 text-right w-20">Qty</th>
+                        <th className="py-2.5 px-4 text-right w-24">Disc%</th>
+                        <th className="py-2.5 px-4 text-right w-32">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/20">
+                      {room.items.filter((i) => i.description.trim()).map((i) => (
+                        <tr key={i.id} className="hover:bg-muted/10 transition-colors">
+                          <td className="py-3 px-4 align-middle">
+                            <div className="flex items-center gap-2">
+                              {showItemImages && (i.photoUrl || (i as any).photo_url) && (
+                                <img src={resolveImageUrl(i.photoUrl || (i as any).photo_url)} alt="" className="h-7 w-7 rounded object-cover border shrink-0" />
+                              )}
+                              <span className="break-all whitespace-pre-wrap min-w-0 flex-1 text-slate-800">{i.description}</span>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right align-middle text-slate-600">{i.qty}</td>
+                          <td className="py-3 px-4 text-right align-middle text-slate-600">{i.disc_percent}%</td>
+                          <td className="py-3 px-4 text-right align-middle font-semibold text-slate-800">₹{roomItemTotal(i).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Totals */}
+          <div className="flex justify-end">
+            <div className="w-full max-w-xs space-y-1.5 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Subtotal</span>
+                <span>₹{subtotal.toFixed(2)}</span>
+              </div>
+              {discountPercent > 0 && (
+                <div className="flex justify-between text-destructive font-medium">
+                  <span>Discount ({discountPercent}%)</span>
+                  <span>-₹{discountAmount.toFixed(2)}</span>
+                </div>
+              )}
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">GST ({gstPercent}%)</span>
+                <span>₹{gstAmount.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between pt-1.5 border-t border-border/40 font-bold">
+                <span>Grand Total</span>
+                <span className="text-primary">₹{grandTotal.toFixed(2)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 bg-muted/30 border-t flex items-center justify-end gap-3 flex-shrink-0">
+          <Button variant="ghost" onClick={() => onOpenChange(false)} className="rounded-xl font-semibold">
+            Back to Edit
+          </Button>
+          <Button onClick={onConfirm} disabled={isSaving} className="rounded-xl font-semibold gap-2">
+            {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Confirm &amp; Save
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}

@@ -1,0 +1,535 @@
+import { useState, useMemo, useEffect } from "react";
+import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
+  Plus,
+  Search,
+  ChevronRight,
+  ChevronDown,
+  Download,
+  FileSpreadsheet,
+  FileJson,
+  FileType,
+  Printer,
+  ExternalLink,
+  Edit,
+  Trash2,
+  Users,
+  Filter,
+  LayoutGrid
+} from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { projectService } from "@/api/services/project.service";
+import { useNavigate } from "react-router-dom";
+import { formatDate } from "@/lib/dateFormat";
+import { TableActions } from "@/components/TableActions";
+import { SkeletonTableRows } from "@/components/ui/skeleton-table-rows";
+import { toast } from "sonner";
+import { usePermissions } from "@/hooks/usePermissions";
+import { isTrinetraPilotUser } from "@/lib/trinetraPilot";
+import { htmlToPlainText } from "@/lib/richText";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell, TableEmpty, TablePagination } from "@/components/ui/table";
+import { defaultPageSize } from "@/lib/tablePageSize";
+
+const statusConfig = [
+  { id: 1, label: "Not Started", color: "bg-slate-100 text-slate-700 border-slate-200" },
+  { id: 2, label: "In Progress", color: "bg-primary/10 text-primary border-primary/20" },
+  { id: 3, label: "On Hold", color: "bg-yellow-50 text-yellow-700 border-yellow-200" },
+  { id: 5, label: "Cancelled", color: "bg-red-50 text-red-700 border-red-200" },
+  { id: 4, label: "Finished", color: "bg-green-50 text-green-700 border-green-200" },
+];
+
+const Projects = () => {
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  const [activeStatus, setActiveStatus] = useState<number | "all">("all");
+  const [itemsPerPage, setItemsPerPage] = useState(() => defaultPageSize(25));
+  const [currentPage, setCurrentPage] = useState(1);
+  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  const [bulkActionOpen, setBulkActionOpen] = useState(false);
+  const [bulkState, setBulkState] = useState({ massDelete: false, status: "" });
+  const [isBulkLoading, setIsBulkLoading] = useState(false);
+  const queryClient = useQueryClient();
+  const { can, user, isModuleEnabled } = usePermissions();
+  const isPilot = isTrinetraPilotUser(user?.email);
+  // Branch is sourced from the HRMS module — only show it when the
+  // tenant's plan actually includes HRMS, even for a pilot-flagged user.
+  const canUseBranch = isPilot && isModuleEnabled("hrms");
+  const navigate = useNavigate();
+
+  // Server-paginated once a finite page size is chosen; "All" (itemsPerPage
+  // >= 999999) keeps the legacy full fetch, filtered client-side exactly as
+  // this page always has — same split used on Invoices/Leads/Items.
+  const { data: projectsResult, isLoading } = useQuery({
+    queryKey: ["projects", itemsPerPage, currentPage, debouncedSearch, activeStatus],
+    queryFn: async () => {
+      if (itemsPerPage >= 999999) {
+        const response = await projectService.getAll();
+        const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+        const q = debouncedSearch.toLowerCase();
+        const rowsFiltered = rows.filter((p: any) => {
+          const branchName = typeof p.branch === "object" ? (p.branch?.name || "") : (p.branch || "");
+          const matchesSearch =
+            !q ||
+            (p.name || "").toLowerCase().includes(q) ||
+            (p.description || "").toLowerCase().includes(q) ||
+            (p.clientid?.company || "").toLowerCase().includes(q) ||
+            (Array.isArray(p.tags) ? p.tags.join(" ") : (p.tags || "")).toLowerCase().includes(q) ||
+            branchName.toLowerCase().includes(q);
+          const matchesStatus = activeStatus === "all" || p.status === activeStatus;
+          return matchesSearch && matchesStatus;
+        });
+        const aggMap = new Map<number, number>();
+        rows.forEach((p: any) => aggMap.set(p.status, (aggMap.get(p.status) || 0) + 1));
+        const statusAgg = Array.from(aggMap.entries()).map(([status, count]) => ({ status, count }));
+        return { rows: rowsFiltered, total: rowsFiltered.length, pages: 1, statusAgg };
+      }
+
+      const res: any = await projectService.getAll({
+        page: currentPage,
+        limit: itemsPerPage,
+        search: debouncedSearch || undefined,
+        status: activeStatus !== "all" ? activeStatus : undefined,
+      });
+      if (Array.isArray(res)) return { rows: [], total: 0, pages: 1, statusAgg: [] };
+      return {
+        rows: res?.data ?? [],
+        total: res?.total ?? 0,
+        pages: res?.pages ?? 1,
+        statusAgg: res?.statusAgg ?? [],
+      };
+    },
+  });
+  const projects: any[] = projectsResult?.rows ?? [];
+  const statusAgg: { status: number; count: number }[] = projectsResult?.statusAgg ?? [];
+  const totalProjectsOverall = statusAgg.reduce((sum, s) => sum + s.count, 0);
+
+  const deleteMutation = useMutation({
+    mutationFn: projectService.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      toast.success("Project deleted successfully");
+    },
+    onError: (err: any) => {
+      toast.error(err.message || "Failed to delete project");
+    },
+  });
+
+  // Export is a one-off action, not the on-screen table — it fetches the
+  // full filtered set on demand rather than paginating.
+  const loadAllFilteredProjects = async () => {
+    const response = await projectService.getAll();
+    const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+    const q = debouncedSearch.toLowerCase();
+    return rows.filter((p: any) => {
+      const branchName = typeof p.branch === "object" ? (p.branch?.name || "") : (p.branch || "");
+      const matchesSearch =
+        !q ||
+        (p.name || "").toLowerCase().includes(q) ||
+        (p.description || "").toLowerCase().includes(q) ||
+        (p.clientid?.company || "").toLowerCase().includes(q) ||
+        (Array.isArray(p.tags) ? p.tags.join(" ") : (p.tags || "")).toLowerCase().includes(q) ||
+        branchName.toLowerCase().includes(q);
+      const matchesStatus = activeStatus === "all" || p.status === activeStatus;
+      return matchesSearch && matchesStatus;
+    });
+  };
+
+  // The table already shows exactly one server-paginated page — no further
+  // client-side slicing needed.
+  const paginatedProjects = projects;
+  const totalProjectPages = projectsResult?.pages ?? 1;
+  const safeProjectPage = Math.min(currentPage, totalProjectPages);
+  const projectPageSize = itemsPerPage >= 999999 ? (paginatedProjects.length || 1) : itemsPerPage;
+  const filteredProjectsCount = projectsResult?.total ?? 0;
+  const projectPageIds = paginatedProjects.map((p: any) => p._id);
+  const allProjectPageSelected = projectPageIds.length > 0 && projectPageIds.every((id: string) => selectedProjects.includes(id));
+
+  const handleBulkAction = async () => {
+    if (selectedProjects.length === 0) {
+      toast.error("No projects selected.");
+      return;
+    }
+    setIsBulkLoading(true);
+    try {
+      if (bulkState.massDelete) {
+        await projectService.bulkDelete(selectedProjects);
+        toast.success(`Deleted ${selectedProjects.length} projects.`);
+      } else if (bulkState.status) {
+        const status = parseInt(bulkState.status);
+        await Promise.all(selectedProjects.map(id => projectService.update(id, { status })));
+        toast.success(`Updated ${selectedProjects.length} projects.`);
+      }
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      setSelectedProjects([]);
+      setBulkActionOpen(false);
+      setBulkState({ massDelete: false, status: "" });
+    } catch (err: any) {
+      toast.error("Failed to perform bulk action.");
+    } finally {
+      setIsBulkLoading(false);
+    }
+  };
+
+  const handleExport = async (type: "xlsx" | "csv" | "pdf" | "print") => {
+    const exportRows = await loadAllFilteredProjects();
+    if (exportRows.length === 0) {
+      toast.error("No data to export");
+      return;
+    }
+
+    if (type === "csv" || type === "xlsx") {
+      const headers = ["Project Name", "Customer", "Tags", "Start Date", "Deadline", "Status"];
+      const rows = exportRows.map((p: any) => [
+        p.name || "",
+        p.clientid?.company || "Unknown",
+        p.tags ? p.tags.join(", ") : "",
+        p.start_date ? formatDate(p.start_date) : "-",
+        p.deadline ? formatDate(p.deadline) : "-",
+        statusConfig.find(s => s.id === p.status)?.label || "Not Started"
+      ]);
+
+      const csvContent = "data:text/csv;charset=utf-8," 
+        + [headers.join(","), ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(","))].join("\n");
+      
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", `projects_export_${new Date().toISOString().split('T')[0]}.${type}`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      toast.success(`Exported successfully as ${type.toUpperCase()}`);
+    } else if (type === "print") {
+      window.print();
+    } else if (type === "pdf") {
+      toast.success("Ready to save - choose Save as PDF in print options");
+      window.print();
+    }
+  };
+
+  const stats = useMemo(() => {
+    return statusConfig.map(status => ({
+      ...status,
+      count: statusAgg.find(s => s.status === status.id)?.count || 0
+    }));
+  }, [statusAgg]);
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">Projects</h1>
+          {can("projects", "create") && (
+            <Button onClick={() => navigate("/admin/projects/create")} className="rounded-xl font-black gap-2 shadow-lg shadow-primary/20 px-6 h-11 uppercase text-xs tracking-widest">
+              <Plus className="mr-2 h-4 w-4" />
+              New Project
+            </Button>
+          )}
+        </div>
+
+        {/* Live Status Filters */}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant={activeStatus === "all" ? "default" : "outline"}
+            size="sm"
+            onClick={() => { setActiveStatus("all"); setCurrentPage(1); }}
+            className="h-8 text-xs font-medium"
+          >
+            All
+            <span className="ml-1.5 opacity-60">({totalProjectsOverall})</span>
+          </Button>
+          {stats.map((status) => (
+            <Button
+              key={status.id}
+              variant={activeStatus === status.id ? "default" : "outline"}
+              size="sm"
+              onClick={() => { setActiveStatus(status.id); setCurrentPage(1); }}
+              className="h-8 text-xs font-medium"
+            >
+              {status.label}
+              <span className="ml-1.5 opacity-60">({status.count})</span>
+            </Button>
+          ))}
+        </div>
+
+        <Card>
+          <CardContent className="p-0">
+            {/* Control Bar */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 border-b">
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={itemsPerPage.toString()} 
+                  onValueChange={(val) => { setItemsPerPage(val === "All" ? 999999 : Number(val)); setCurrentPage(1); }}
+                >
+                  <SelectTrigger className="w-[70px] h-8 text-[11px] font-bold">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10</SelectItem>
+                    <SelectItem value="25">25</SelectItem>
+                    <SelectItem value="50">50</SelectItem>
+                    <SelectItem value="100">100</SelectItem>
+                    <SelectItem value="All">All</SelectItem>
+                  </SelectContent>
+                </Select>
+ 
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-8 gap-2 text-xs font-bold uppercase tracking-wider hover:bg-transparent">
+                      <Download className="h-3.5 w-3.5" />
+                      Export
+                      <ChevronDown className="h-3 w-3 opacity-50" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-40">
+                    <DropdownMenuItem onClick={() => handleExport("xlsx")} className="gap-3 cursor-pointer text-xs font-bold">
+                      <FileSpreadsheet className="h-4 w-4 text-green-600" />
+                      <span>Excel</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport("csv")} className="gap-3 cursor-pointer text-xs font-bold">
+                      <FileJson className="h-4 w-4 text-blue-600" />
+                      <span>CSV</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport("pdf")} className="gap-3 cursor-pointer text-xs font-bold">
+                      <FileType className="h-4 w-4 text-red-600" />
+                      <span>PDF</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleExport("print")} className="gap-3 cursor-pointer text-xs font-bold">
+                      <Printer className="h-4 w-4 text-gray-600" />
+                      <span>Print</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+
+                <Dialog open={bulkActionOpen} onOpenChange={(open) => {
+                  if (open && selectedProjects.length === 0) {
+                    toast.error("Please select at least one project first.");
+                    return;
+                  }
+                  setBulkState({ massDelete: false, status: "" }); // clear unsaved bulk choices on open/close
+                  setBulkActionOpen(open);
+                }}>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-8 px-4 rounded-md gap-2 font-black uppercase text-[10px] tracking-widest bg-slate-50 border-slate-200 text-slate-700">
+                      Bulk Actions
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Bulk Actions</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-5 pt-4">
+                      <div className="flex items-center space-x-2">
+                        <Checkbox 
+                          id="massDelete" 
+                          className="border-red-500 data-[state=checked]:bg-red-500"
+                          checked={bulkState.massDelete}
+                          onCheckedChange={(checked) => setBulkState({...bulkState, massDelete: checked as boolean})}
+                        />
+                        <Label htmlFor="massDelete" className="text-red-600 font-bold">Mass Delete</Label>
+                      </div>
+                      <div className="grid grid-cols-1 gap-5 mt-2 pt-5 border-t">
+                        <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase tracking-wider text-slate-500">Status</Label>
+                          <Select value={bulkState.status} onValueChange={(val) => setBulkState({...bulkState, status: val})} disabled={bulkState.massDelete}>
+                            <SelectTrigger className="h-10"><SelectValue placeholder="Select Status" /></SelectTrigger>
+                            <SelectContent>
+                              {statusConfig.map(s => (
+                                <SelectItem key={s.id} value={s.id.toString()}>{s.label}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      <div className="flex justify-end gap-2 pt-4 border-t mt-4">
+                        <Button variant="outline" onClick={() => setBulkActionOpen(false)}>Cancel</Button>
+                        <Button onClick={handleBulkAction} disabled={isBulkLoading}>
+                          {isBulkLoading ? "Processing..." : "Confirm"}
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              </div>
+
+              <div className="relative w-full sm:w-auto">
+                <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  placeholder="Search projects..."
+                  className="pl-8 h-8 w-full sm:w-[200px] text-xs"
+                  value={search}
+                  onChange={(e) => { setSearch(e.target.value); setCurrentPage(1); }}
+                />
+              </div>
+            </div>
+
+            {/* Old Table Style */}
+            <div className="overflow-x-auto">
+              <Table className="min-w-[900px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-8">
+                      <Checkbox
+                        checked={allProjectPageSelected}
+                        onCheckedChange={() => {
+                          setSelectedProjects(prev =>
+                            allProjectPageSelected ? prev.filter((id: string) => !projectPageIds.includes(id)) : [...new Set([...prev, ...projectPageIds])]
+                          );
+                        }}
+                      />
+                    </TableHead>
+                    <TableHead>#</TableHead>
+                    <TableHead>Project Name ↕</TableHead>
+                    <TableHead>Customer</TableHead>
+                    {canUseBranch && <TableHead>Branch</TableHead>}
+                    <TableHead>Tags</TableHead>
+                    <TableHead className="text-center">Start Date</TableHead>
+                    <TableHead className="text-center">Deadline</TableHead>
+                    <TableHead className="text-center">Members</TableHead>
+                    <TableHead className="text-center">Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    <SkeletonTableRows rows={6} colSpan={10 + (canUseBranch ? 1 : 0)} />
+                  ) : paginatedProjects.length === 0 ? (
+                    <TableEmpty colSpan={10 + (canUseBranch ? 1 : 0)}>No projects found.</TableEmpty>
+                  ) : (
+                    paginatedProjects.map((project, index) => (
+                      <TableRow key={project._id}>
+                        <TableCell>
+                          <Checkbox 
+                            checked={selectedProjects.includes(project._id)}
+                            onCheckedChange={(checked) => {
+                              if (checked) {
+                                setSelectedProjects([...selectedProjects, project._id]);
+                              } else {
+                                setSelectedProjects(selectedProjects.filter(id => id !== project._id));
+                              }
+                            }}
+                          />
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">{index + 1}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-col">
+                            <span
+                              onClick={() => navigate(`/admin/projects/view/${project._id}`)}
+                              className="text-sm font-semibold text-primary hover:underline cursor-pointer"
+                            >
+                              {project.name}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground line-clamp-1">{htmlToPlainText(project.description)}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <span 
+                            onClick={() => navigate(`/admin/customers/${project.clientid?._id}`)}
+                            className="text-xs font-medium text-zinc-700 hover:text-primary cursor-pointer transition-colors"
+                          >
+                            {project.clientid?.company || "Unknown"}
+                          </span>
+                        </TableCell>
+                        {canUseBranch && (
+                          <TableCell className="whitespace-nowrap">
+                            {typeof project.branch === "object" ? (project.branch?.name || "-") : (project.branch || "-")}
+                          </TableCell>
+                        )}
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1">
+                            {project.tags && project.tags.length > 0 ? (
+                              project.tags.map((tag: string) => (
+                                <Badge key={tag} variant="secondary" className="text-[9px] px-1 h-4 font-bold uppercase">
+                                  {tag.trim()}
+                                </Badge>
+                              ))
+                            ) : (
+                              <span className="text-[10px] text-zinc-300">No tags</span>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          {project.start_date ? formatDate(project.start_date) : "-"}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          {project.deadline ? formatDate(project.deadline) : "-"}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <div className="flex -space-x-2 justify-center">
+                            <Avatar className="h-6 w-6 border border-white shadow-sm">
+                              <AvatarFallback className="bg-primary/5 text-primary text-[8px] font-bold">TM</AvatarFallback>
+                            </Avatar>
+                            <div className="h-6 w-6 border border-white shadow-sm bg-zinc-50 flex items-center justify-center rounded-full text-[8px] font-bold text-zinc-400">
+                              +2
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <Badge className={`rounded-md px-1.5 py-0.5 font-bold text-[9px] uppercase tracking-tighter ${statusConfig.find(s => s.id === project.status)?.color || statusConfig[0].color}`}>
+                            {statusConfig.find(s => s.id === project.status)?.label || "Not Started"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <TableActions
+                            onView={() => navigate(`/admin/projects/view/${project._id}`)}
+                            onEdit={() => navigate(`/admin/projects/edit/${project._id}`)}
+                            onDelete={() => {
+                              if (confirm("Are you sure you want to delete this project?")) {
+                                deleteMutation.mutate(project._id);
+                              }
+                            }}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* Pagination Footer */}
+            <TablePagination
+              page={safeProjectPage}
+              pageSize={projectPageSize}
+              total={filteredProjectsCount}
+              onPageChange={(p) => setCurrentPage(Math.min(Math.max(1, p), totalProjectPages))}
+            />
+          </CardContent>
+        </Card>
+      </div>
+    </DashboardLayout>
+  );
+};
+
+export default Projects;

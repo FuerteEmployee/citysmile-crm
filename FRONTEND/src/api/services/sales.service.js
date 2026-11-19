@@ -1,0 +1,75 @@
+import { apiClient } from "../client";
+
+// NOTE: All estimate-related methods have been moved to estimate.service.js
+// This file retains only: Invoices, Payments, Expenses, Subscriptions, Proposals.
+
+export const salesService = {
+  // ─────────────────────────────────────────────
+  // Invoices
+  // ─────────────────────────────────────────────
+  getInvoices: (params) => apiClient.get("/invoices", { params }),
+  getInvoiceBranches: () => apiClient.get("/invoices/branches"),
+  getProposals: (params) => apiClient.get("/proposals", { params }),
+  getProposalById: (id) => apiClient.get(`/proposals/${id}`),
+  // Next proposal number + Setup > Settings > Proposals defaults for a new proposal.
+  getNextProposalNumber: () => apiClient.get("/proposals/next-number"),
+  getInvoiceById: (id) => apiClient.get(`/invoices/${id}`),
+  // Next invoice number + Setup > Settings > Invoices defaults for a new invoice.
+  getNextInvoiceNumber: (date) => apiClient.get(`/invoices/next-number${date ? `?date=${encodeURIComponent(date)}` : ""}`),
+  createInvoice: (data) => apiClient.post("/invoices", data),
+  updateInvoice: (id, data) => apiClient.put(`/invoices/${id}`, data),
+  deleteInvoice: (id) => apiClient.delete(`/invoices/${id}`),
+  bulkDeleteInvoices: (ids) => apiClient.post("/invoices/bulk-delete", { ids }),
+  // "Send Invoice to Email": pre-filled To / Subject / Message, then send (PDF as base64).
+  getInvoiceEmailDraft: (id) => apiClient.get(`/invoices/${id}/email-draft`),
+  sendInvoiceEmail: (id, data) => apiClient.post(`/invoices/${id}/send-email`, data),
+  createProposal: (data) => apiClient.post("/proposals", data),
+  updateProposal: (id, data) => apiClient.put(`/proposals/${id}`, data),
+  deleteProposal: (id) => apiClient.delete(`/proposals/${id}`),
+  bulkDeleteProposals: (ids) => apiClient.post("/proposals/bulk-delete", { ids }),
+
+  // ─────────────────────────────────────────────
+  // Payments
+  // ─────────────────────────────────────────────
+  getPayments: (params) => apiClient.get("/payments", params ? { params } : undefined),
+  getPaymentsByCustomer: (clientId) => apiClient.get(`/payments/customer/${clientId}`),
+  getPaymentsByInvoice: (invoiceId) => apiClient.get(`/payments/invoice/${invoiceId}`),
+  createPayment: (data) => apiClient.post("/payments", data),
+  updatePayment: (id, data) => apiClient.put(`/payments/${id}`, data),
+  deletePayment: (id) => apiClient.delete(`/payments/${id}`),
+  bulkDeletePayments: (ids) => apiClient.post("/payments/bulk-delete", { ids }),
+
+  // ─────────────────────────────────────────────
+  // Expenses
+  // ─────────────────────────────────────────────
+  getExpenses: (params) => apiClient.get("/expenses", { params }),
+  createExpense: (data) => apiClient.post("/expenses", data),
+  updateExpense: (id, data) => apiClient.put(`/expenses/${id}`, data),
+  getExpenseById: (id) => apiClient.get(`/expenses/${id}`),
+  deleteExpense: (id) => apiClient.delete(`/expenses/${id}`),
+
+  // ─────────────────────────────────────────────
+  // Subscriptions
+  // ─────────────────────────────────────────────
+  getSubscriptions: () => apiClient.get("/subscriptions"),
+  getSubscriptionById: (id) => apiClient.get(`/subscriptions/${id}`),
+  createSubscription: (data) => apiClient.post("/subscriptions", data),
+  updateSubscription: (id, data) => apiClient.put(`/subscriptions/${id}`, data),
+
+  // ─────────────────────────────────────────────
+  // Proposals
+  // ─────────────────────────────────────────────
+
+
+  // ─────────────────────────────────────────────
+  // Credit Notes
+  // ─────────────────────────────────────────────
+  getCreditNotes: (params) => apiClient.get("/credit-notes", { params }),
+
+  // ─────────────────────────────────────────────
+  // Imports
+  // ─────────────────────────────────────────────
+  importInvoices: (data) => apiClient.post("/invoices/import", data),
+  importProposals: (data) => apiClient.post("/proposals/import", data),
+  importPayments: (data) => apiClient.post("/payments/import", data),
+};

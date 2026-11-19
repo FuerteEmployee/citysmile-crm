@@ -1,0 +1,535 @@
+import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Plus, Search, Zap } from "lucide-react";
+import { formatDate } from "@/lib/dateFormat";
+import { TableActions } from "@/components/TableActions";
+import { useToast } from "@/hooks/use-toast";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useOpenCreateModal } from "@/hooks/useOpenCreateModal";
+import { usePermissions } from "@/hooks/usePermissions";
+import { contractService } from "@/api/services/contract.service";
+import { customerService } from "@/api/services/customer.service";
+import { ExportButton } from "@/components/ui/export-button";
+import { ImportButton } from "@/components/ui/import-button";
+import { SkeletonTableRows } from "@/components/ui/skeleton-table-rows";
+import { TableContainer, Table, TableHeader, TableBody, TableRow, TableHead, TableCell, TableEmpty, TablePagination } from "@/components/ui/table";
+import { useCurrency } from "@/context/CurrencyContext";
+import { defaultPageSize } from "@/lib/tablePageSize";
+
+const statusColors: Record<string, string> = {
+  Active:
+    "bg-green-50 text-green-700 border-green-200 dark:bg-green-900/20 dark:text-green-400",
+  Draft: "bg-muted text-muted-foreground border-border",
+  Expired:
+    "bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-400",
+  Signed: "bg-primary/10 text-primary border-primary/20",
+};
+
+const Contracts = () => {
+  const [clients, setClients] = useState<any[]>([]);
+  const [editItem, setEditItem] = useState<any | null>(null);
+  const [isAddOpen, setIsAddOpen] = useState(false);
+  useOpenCreateModal(() => setIsAddOpen(true));
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  const [itemsPerPage, setItemsPerPage] = useState(() => String(defaultPageSize(10)));
+  const [currentPage, setCurrentPage] = useState(1);
+  const { toast } = useToast();
+  const { can } = usePermissions();
+  const { formatAmount } = useCurrency();
+  const [selectedContracts, setSelectedContracts] = useState<string[]>([]);
+  const [bulkActionOpen, setBulkActionOpen] = useState(false);
+  const [bulkState, setBulkState] = useState({ massDelete: false });
+  const [isBulkLoading, setIsBulkLoading] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const queryClient = useQueryClient();
+
+  // Server-paginated once a finite page size is chosen; "All" keeps the
+  // legacy full fetch, filtered client-side exactly as this page always has
+  // — same split used on Invoices/Leads/Projects.
+  const { data: contractsResult, isLoading: loading } = useQuery({
+    queryKey: ["contracts", itemsPerPage, currentPage, debouncedSearch],
+    queryFn: async () => {
+      if (itemsPerPage === "All") {
+        const response = await contractService.getContracts();
+        const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+        const q = debouncedSearch.toLowerCase();
+        const rowsFiltered = rows.filter((c: any) =>
+          (c.subject || "").toLowerCase().includes(q) ||
+          (c.client?.company || "").toLowerCase().includes(q) ||
+          String(c.contract_value ?? "").toLowerCase().includes(q)
+        );
+        return { rows: rowsFiltered, total: rowsFiltered.length, pages: 1 };
+      }
+
+      const res: any = await contractService.getContracts({
+        page: currentPage,
+        limit: itemsPerPage,
+        search: debouncedSearch || undefined,
+      });
+      if (Array.isArray(res)) return { rows: [], total: 0, pages: 1 };
+      return { rows: res?.data ?? [], total: res?.total ?? 0, pages: res?.pages ?? 1 };
+    },
+  });
+  const contracts: any[] = contractsResult?.rows ?? [];
+
+  useEffect(() => {
+    customerService.getAll().then((data: any) => setClients(data || [])).catch(() => {});
+  }, []);
+
+  // Export is a one-off action, not the on-screen table — it fetches the
+  // full filtered set on demand rather than paginating.
+  const loadAllFilteredContracts = async () => {
+    const response = await contractService.getContracts();
+    const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+    const q = debouncedSearch.toLowerCase();
+    return rows.filter((c: any) =>
+      (c.subject || "").toLowerCase().includes(q) ||
+      (c.client?.company || "").toLowerCase().includes(q) ||
+      String(c.contract_value ?? "").toLowerCase().includes(q)
+    );
+  };
+
+  // The table already shows exactly one server-paginated page — no further
+  // client-side slicing needed.
+  const paginatedContracts = contracts;
+  const filteredTotal = contractsResult?.total ?? 0;
+  const totalContractPages = contractsResult?.pages ?? 1;
+  const safeContractPage = Math.min(currentPage, totalContractPages);
+  const contractPageSize = itemsPerPage === "All" ? (paginatedContracts.length || 1) : parseInt(itemsPerPage);
+  const allContractPageSelected = paginatedContracts.length > 0 && paginatedContracts.every((item: any) => selectedContracts.includes(item._id));
+
+  const handleSelectAll = (checked: boolean) => {
+    const pageIds = paginatedContracts.map((item: any) => item._id);
+    if (checked) setSelectedContracts(prev => [...new Set([...prev, ...pageIds])]);
+    else setSelectedContracts(prev => prev.filter((id: string) => !pageIds.includes(id)));
+  };
+
+  const handleBulkAction = async () => {
+    if (selectedContracts.length === 0) {
+      toast({ title: "Error", description: "No items selected."});
+      return;
+    }
+    setIsBulkLoading(true);
+    try {
+      if (bulkState.massDelete) {
+        await contractService.bulkDeleteContracts(selectedContracts);
+        toast({ title: "Success", description: `Deleted ${selectedContracts.length} items.` });
+        queryClient.invalidateQueries({ queryKey: ["contracts"] });
+      }
+      setSelectedContracts([]);
+      setBulkActionOpen(false);
+      setBulkState({ massDelete: false });
+    } catch {
+      toast({ title: "Error", description: "Failed to perform bulk action."});
+    } finally {
+      setIsBulkLoading(false);
+    }
+  };
+
+  // Form State
+  const [formData, setFormData] = useState({
+    client: "",
+    subject: "",
+    contract_value: "",
+    contract_type: "",
+    datestart: "",
+    dateend: "",
+    description: "",
+  });
+
+  const handleImportData = async (rows: Record<string, any>[]) => {
+    setIsImporting(true);
+    try {
+      const result: any = await contractService.importContracts(rows);
+      const count = result?.count ?? 0;
+      const skipped = result?.skipped ?? 0;
+      toast({
+        title: count === 0 ? "No Contracts Imported" : "Import Successful",
+        description: count === 0 ? "No rows matched an existing client and subject." : `Imported ${count} contract(s)${skipped ? `, skipped ${skipped} invalid row(s)` : ""}.`,
+        variant: count === 0 ? "destructive" : "default",
+      });
+      queryClient.invalidateQueries({ queryKey: ["contracts"] });
+    } catch (error: any) {
+      toast({ title: "Import Failed", description: error?.response?.data?.message || error.message, variant: "destructive" });
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await contractService.deleteContract(id);
+      queryClient.invalidateQueries({ queryKey: ["contracts"] });
+      toast({ title: "Deleted", description: "Contract deleted." });
+    } catch (error) {
+      toast({ title: "Error", description: "Failed to delete.", variant: "destructive" });
+    }
+  };
+
+  const handleCreate = async () => {
+    if (!formData.client || !formData.subject) {
+      toast({ title: "Error", description: "Client and Subject are required.", variant: "destructive" });
+      return;
+    }
+    try {
+      const dataToSubmit = {
+        ...formData,
+        contract_value: Number(formData.contract_value) || 0
+      };
+      await contractService.createContract(dataToSubmit);
+      queryClient.invalidateQueries({ queryKey: ["contracts"] });
+      toast({ title: "Created", description: "Contract created successfully." });
+      setIsAddOpen(false);
+      setFormData({
+        client: "",
+        subject: "",
+        contract_value: "",
+        contract_type: "",
+        datestart: "",
+        dateend: "",
+        description: "",
+      });
+    } catch (error) {
+      console.error("Create error:", error);
+      toast({ title: "Error", description: "Failed to create contract.", variant: "destructive" });
+    }
+  };
+
+  const handleUpdate = async () => {
+    try {
+      const dataToSubmit = {
+        subject: editItem.subject,
+        contract_value: Number(editItem.contract_value) || 0,
+        contract_type: editItem.contract_type,
+        datestart: editItem.datestart,
+        dateend: editItem.dateend,
+        description: editItem.description,
+      };
+      await contractService.updateContract(editItem._id, dataToSubmit);
+      queryClient.invalidateQueries({ queryKey: ["contracts"] });
+      toast({ title: "Updated", description: "Contract updated successfully." });
+      setEditItem(null);
+    } catch (error) {
+      console.error("Update error:", error);
+      toast({ title: "Error", description: "Failed to update contract.", variant: "destructive" });
+    }
+  };
+
+  const getStatus = (c: any) => {
+    if (c.is_signed) return "Signed";
+    const now = new Date();
+    if (c.dateend && new Date(c.dateend) < now) return "Expired";
+    return "Active";
+  };
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold">Contracts</h1>
+            <p className="text-muted-foreground">
+              Manage customer contracts and agreements
+            </p>
+          </div>
+          {can("Contracts", "Create") && (
+            <Dialog open={isAddOpen} onOpenChange={(open) => {
+              setIsAddOpen(open);
+              // discard unsaved values when closed without saving
+              if (!open) setFormData({ client: "", subject: "", contract_value: "", contract_type: "", datestart: "", dateend: "", description: "" });
+            }}>
+              <DialogTrigger asChild>
+                <Button className="rounded-xl font-black gap-2 shadow-lg shadow-primary/20 px-6 h-11 uppercase text-xs tracking-widest">
+                  <Plus className="h-4 w-4" />
+                  New Contract
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add Contract</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 pt-2 max-h-[70vh] overflow-y-auto">
+                  <div className="space-y-2">
+                    <Label>Customer *</Label>
+                    <Select value={formData.client} onValueChange={(val) => setFormData({ ...formData, client: val })}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select customer" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {clients.map(c => (
+                          <SelectItem key={c._id} value={c._id}>{c.company || c.firstname}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Subject *</Label>
+                    <Input placeholder="Contract subject" value={formData.subject} onChange={(e) => setFormData({ ...formData, subject: e.target.value })} />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Contract Value</Label>
+                      <Input type="number" placeholder="0.00" value={formData.contract_value} onChange={(e) => setFormData({ ...formData, contract_value: e.target.value })} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Contract Type</Label>
+                      <Select value={formData.contract_type} onValueChange={(val) => setFormData({ ...formData, contract_type: val })}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select type" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Fixed">Fixed Price</SelectItem>
+                          <SelectItem value="Hourly">Hourly</SelectItem>
+                          <SelectItem value="Retainer">Retainer</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Start Date</Label>
+                      <Input type="date" value={formData.datestart} onChange={(e) => setFormData({ ...formData, datestart: e.target.value })} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>End Date</Label>
+                      <Input type="date" value={formData.dateend} onChange={(e) => setFormData({ ...formData, dateend: e.target.value })} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Description</Label>
+                    <Textarea placeholder="Contract description..." rows={3} value={formData.description} onChange={(e) => setFormData({ ...formData, description: e.target.value })} />
+                  </div>
+                  <Button className="w-full" onClick={handleCreate}>Save Contract</Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          )}
+        </div>
+
+        {/* Table Controls */}
+        <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-muted/10 p-4 rounded-2xl border border-border/50">
+          <div className="flex flex-wrap items-center gap-3">
+            <Select value={itemsPerPage} onValueChange={(v) => { setItemsPerPage(v); setCurrentPage(1); }}>
+              <SelectTrigger className="h-9 w-[80px] bg-background border-none shadow-sm rounded-lg text-xs font-bold">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {["10", "25", "50", "100", "All"].map((v) => (
+                  <SelectItem key={v} value={v}>
+                    {v}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Dialog open={bulkActionOpen} onOpenChange={(open) => {
+              if (open && selectedContracts.length === 0) {
+                toast({ title: "Error", description: "Please select at least one item first."});
+                return;
+              }
+              setBulkState({ massDelete: false }); // clear unsaved bulk choices on open/close
+              setBulkActionOpen(open);
+            }}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm" className="h-11 px-6 rounded-xl gap-2 font-black uppercase text-[10px] tracking-widest bg-slate-50 border-slate-200 text-slate-700">
+                  <Zap className="h-3.5 w-3.5 text-primary" />
+                  Bulk Actions
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-md bg-white">
+                <DialogHeader>
+                  <DialogTitle className="text-lg font-bold">Bulk Actions</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-4">
+                  <div className="flex items-center space-x-2">
+                    <Checkbox
+                      id="mass_delete"
+                      className="border-red-200 data-[state=checked]:bg-red-500 data-[state=checked]:border-red-500"
+                      checked={bulkState.massDelete}
+                      onCheckedChange={(checked) => setBulkState({...bulkState, massDelete: checked as boolean})}
+                    />
+                    <Label htmlFor="mass_delete" className="text-sm font-semibold text-red-600">Mass Delete</Label>
+                  </div>
+                </div>
+                <DialogFooter className="gap-2 sm:gap-0">
+                  <Button variant="ghost" onClick={() => setBulkActionOpen(false)} className="font-bold uppercase tracking-widest text-[10px]">Close</Button>
+                  <Button onClick={handleBulkAction} disabled={isBulkLoading} className="font-bold uppercase tracking-widest text-[10px]">
+                    {isBulkLoading ? "Processing..." : "Confirm"}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <ExportButton 
+              data={loadAllFilteredContracts}
+              filename="contracts" 
+              columns={[
+                { header: "Title", key: "subject" },
+                { header: "Customer", key: (c) => c.client?.company || c.client?.firstname || "Unknown" },
+                { header: "Value", key: "contract_value" },
+                { header: "Status", key: getStatus },
+                { header: "Start", key: "datestart" },
+                { header: "End", key: "dateend" }
+              ]}
+            />
+            <ImportButton onData={handleImportData} loading={isImporting} />
+          </div>
+          <div className="relative w-full md:w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <Input
+              placeholder="Search contracts..."
+              className="pl-9 h-9 bg-background border-none shadow-sm rounded-lg text-xs"
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setCurrentPage(1); }}
+            />
+          </div>
+        </div>
+        <TableContainer>
+              <Table className="min-w-[800px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-8">
+                      <input
+                        type="checkbox"
+                        className="rounded border-border"
+                        checked={allContractPageSelected}
+                        onChange={(e) => handleSelectAll(e.target.checked)}
+                      />
+                    </TableHead>
+                    <TableHead>Title</TableHead>
+                    <TableHead>Customer</TableHead>
+                    <TableHead>Value</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Start</TableHead>
+                    <TableHead>End</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {loading ? (
+                    <SkeletonTableRows rows={6} colSpan={8} />
+                  ) : paginatedContracts.length === 0 ? (
+                    <TableEmpty colSpan={8}>No contracts found.</TableEmpty>
+                  ) : paginatedContracts.map((c) => (
+                    <TableRow
+                      key={c._id}
+                      className={selectedContracts.includes(c._id) ? 'bg-primary/5' : ''}
+                    >
+                      <TableCell>
+                        <input
+                          type="checkbox"
+                          className="rounded border-border"
+                          checked={selectedContracts.includes(c._id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setSelectedContracts(prev => [...prev, c._id]);
+                            else setSelectedContracts(prev => prev.filter(id => id !== c._id));
+                          }}
+                        />
+                      </TableCell>
+                      <TableCell className="font-medium">{c.subject}</TableCell>
+                      <TableCell>{c.client?.company || c.client?.firstname || "Unknown"}</TableCell>
+                      <TableCell className="font-medium">
+                        {formatAmount(c.contract_value || 0)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={statusColors[getStatus(c)] || statusColors.Active}>
+                          {getStatus(c)}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {c.datestart ? formatDate(c.datestart) : "-"}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {c.dateend ? formatDate(c.dateend) : "-"}
+                      </TableCell>
+                      <TableCell>
+                        <TableActions
+                          onView={() => window.open(`/admin/contracts/view/${c._id}`, "_blank")}
+                          onEdit={
+                            can("Contracts", "Edit") ? () => setEditItem(c) : undefined
+                          }
+                          onDelete={
+                            can("Contracts", "Delete")
+                              ? () => handleDelete(c._id)
+                              : undefined
+                          }
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <TablePagination page={safeContractPage} pageSize={contractPageSize} total={filteredTotal} onPageChange={setCurrentPage} />
+        </TableContainer>
+      </div>
+
+
+      <Dialog open={!!editItem} onOpenChange={() => setEditItem(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader><DialogTitle>Edit Contract</DialogTitle></DialogHeader>
+          {editItem && (<div className="space-y-4 pt-2 max-h-[70vh] overflow-y-auto">
+            <div className="space-y-2">
+              <Label>Customer</Label>
+              <p className="text-sm font-medium text-muted-foreground px-3 py-2 rounded-lg bg-muted/40">
+                {editItem.client?.company || editItem.client?.firstname || "Unknown"}
+              </p>
+            </div>
+            <div className="space-y-2"><Label>Subject</Label><Input value={editItem.subject || ""} onChange={(e) => setEditItem({...editItem, subject: e.target.value})} /></div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2"><Label>Contract Value</Label><Input type="number" value={editItem.contract_value || ""} onChange={(e) => setEditItem({...editItem, contract_value: e.target.value})} /></div>
+              <div className="space-y-2">
+                <Label>Contract Type</Label>
+                <Select value={editItem.contract_type || ""} onValueChange={(val) => setEditItem({...editItem, contract_type: val})}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Fixed">Fixed Price</SelectItem>
+                    <SelectItem value="Hourly">Hourly</SelectItem>
+                    <SelectItem value="Retainer">Retainer</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2"><Label>Start Date</Label><Input type="date" value={editItem.datestart?.substring(0, 10) || ""} onChange={(e) => setEditItem({...editItem, datestart: e.target.value})} /></div>
+              <div className="space-y-2"><Label>End Date</Label><Input type="date" value={editItem.dateend?.substring(0, 10) || ""} onChange={(e) => setEditItem({...editItem, dateend: e.target.value})} /></div>
+            </div>
+            <div className="space-y-2">
+              <Label>Description</Label>
+              <Textarea rows={3} value={editItem.description || ""} onChange={(e) => setEditItem({...editItem, description: e.target.value})} />
+            </div>
+            <Button className="w-full" onClick={handleUpdate}>Save Changes</Button>
+          </div>)}
+        </DialogContent>
+      </Dialog>
+    </DashboardLayout>
+  );
+};
+
+export default Contracts;

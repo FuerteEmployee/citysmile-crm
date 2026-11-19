@@ -1,0 +1,427 @@
+import { useEffect, useState } from "react";
+import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { 
+  Plus, 
+  Search, 
+  Download, 
+  FileText, 
+  Printer, 
+  MoreHorizontal,
+  Eye,
+  Edit,
+  Trash2,
+  FileDown,
+  Receipt,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Wallet
+} from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import { salesService } from "@/api/services/sales.service";
+import { formatDate } from "@/lib/dateFormat";
+import { useToast } from "@/hooks/use-toast";
+import { Skeleton } from "@/components/ui/skeleton";
+import { TableContainer, Table, TableHeader, TableBody, TableRow, TableHead, TableCell, TableEmpty, TablePagination } from "@/components/ui/table";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useCurrency } from "@/context/CurrencyContext";
+import { defaultPageSize } from "@/lib/tablePageSize";
+
+const Expenses = () => {
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  const [itemsPerPage, setItemsPerPage] = useState(() => String(defaultPageSize(10)));
+  const [currentPage, setCurrentPage] = useState(1);
+  const [selectedExpenses, setSelectedExpenses] = useState<string[]>([]);
+  const [bulkActionOpen, setBulkActionOpen] = useState(false);
+  const [bulkState, setBulkState] = useState({ massDelete: false });
+  const [isBulkLoading, setIsBulkLoading] = useState(false);
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const { can } = usePermissions();
+  const { formatAmount } = useCurrency();
+
+  const { data: expenses = [], isLoading } = useQuery<any[]>({
+    queryKey: ["expenses", debouncedSearch],
+    queryFn: () => salesService.getExpenses({ search: debouncedSearch || undefined }),
+  });
+
+  // Kept as a redundant client-side layer (same pattern as every other
+  // module) even though the backend now also filters by `search`.
+  const filtered = expenses.filter((e: any) => {
+    const searchStr = search.toLowerCase();
+    return (
+      (e.expense_name || "").toLowerCase().includes(searchStr) ||
+      (e.category || "").toLowerCase().includes(searchStr) ||
+      (e.reference_no || "").toLowerCase().includes(searchStr) ||
+      (e.paymentmode || "").toLowerCase().includes(searchStr) ||
+      (e.project?.name || e.project || "").toLowerCase().includes(searchStr) ||
+      (e.invoiceid?.number || "").toLowerCase().includes(searchStr)
+    );
+  });
+
+  const expensePageSize = itemsPerPage === "All" ? (filtered.length || 1) : parseInt(itemsPerPage);
+  const totalExpensePages = Math.max(1, Math.ceil(filtered.length / expensePageSize));
+  const safeExpensePage = Math.min(currentPage, totalExpensePages);
+  const paginatedExpenses = itemsPerPage === "All" ? filtered : filtered.slice((safeExpensePage - 1) * expensePageSize, safeExpensePage * expensePageSize);
+  const allExpensePageSelected = paginatedExpenses.length > 0 && paginatedExpenses.every((e: any) => selectedExpenses.includes(e._id));
+
+  const handleBulkAction = async () => {
+    if (selectedExpenses.length === 0) {
+      toast({ title: "Error", description: "No expenses selected"});
+      return;
+    }
+    setIsBulkLoading(true);
+    try {
+      if (bulkState.massDelete) {
+        await Promise.all(selectedExpenses.map(id => salesService.deleteExpense(id)));
+        toast({ title: "Success", description: `Deleted ${selectedExpenses.length} expenses.` });
+      }
+      queryClient.invalidateQueries({ queryKey: ["expenses"] });
+      setSelectedExpenses([]);
+      setBulkActionOpen(false);
+      setBulkState({ massDelete: false });
+    } catch (err: any) {
+      toast({ title: "Error", description: "Failed to perform bulk action."});
+    } finally {
+      setIsBulkLoading(false);
+    }
+  };
+
+  // Calculate Statistics
+  const stats = {
+    total: expenses.reduce((sum, e) => sum + (e.amount || 0), 0),
+    billable: expenses.filter(e => e.billable).reduce((sum, e) => sum + (e.amount || 0), 0),
+    nonBillable: expenses.filter(e => !e.billable).reduce((sum, e) => sum + (e.amount || 0), 0),
+    notInvoiced: expenses.filter(e => e.billable && !e.invoiceid).reduce((sum, e) => sum + (e.amount || 0), 0),
+    billed: expenses.filter(e => e.invoiceid).reduce((sum, e) => sum + (e.amount || 0), 0),
+  };
+
+  const statusCards = [
+    { title: "Total", value: stats.total, icon: Wallet, color: "text-blue-600", bg: "bg-blue-50" },
+    { title: "Billable", value: stats.billable, icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50" },
+    { title: "Non Billable", value: stats.nonBillable, icon: XCircle, color: "text-rose-600", bg: "bg-rose-50" },
+    { title: "Not Invoiced", value: stats.notInvoiced, icon: Clock, color: "text-amber-600", bg: "bg-amber-50" },
+    { title: "Billed", value: stats.billed, icon: FileDown, color: "text-indigo-600", bg: "bg-indigo-50" },
+  ];
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-8 animate-in fade-in duration-700">
+        {/* Header */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-black text-foreground tracking-tight">Expenses</h1>
+            <p className="text-muted-foreground text-sm font-bold uppercase tracking-widest mt-1">
+              Manage and track business expenditures
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {can("Expenses", "Create") && (
+              <Button 
+                className="rounded-xl font-black gap-2 shadow-lg shadow-primary/20 px-6 h-11 uppercase text-xs tracking-widest"
+                onClick={() => navigate("/admin/expenses/create")}
+              >
+                <Plus className="h-4 w-4" />
+                Record Expense
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Status Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+          {statusCards.map((card, i) => (
+            <Card key={i} className="border-none shadow-2xl shadow-primary/5 rounded-[2rem] bg-background/60 backdrop-blur-xl overflow-hidden group hover:scale-[1.02] transition-all duration-500">
+              <CardContent className="p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className={`p-3 rounded-2xl ${card.bg} ${card.color} transition-transform group-hover:rotate-12`}>
+                    <card.icon className="h-5 w-5" />
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-muted-foreground mb-1">
+                    {card.title}
+                  </p>
+                  <p className="text-2xl font-black text-foreground">
+                    {formatAmount(card.value)}
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        {/* Table Card */}
+        <Card className="border-none shadow-2xl shadow-primary/5 rounded-[2.5rem] bg-background/60 backdrop-blur-xl overflow-hidden">
+          <CardContent className="p-8">
+            {/* Table Controls */}
+            <div className="flex flex-col md:flex-row justify-between items-center gap-6 mb-8">
+              <div className="flex items-center gap-4 w-full md:w-auto">
+                <Select value={itemsPerPage} onValueChange={(v) => { setItemsPerPage(v); setCurrentPage(1); }}>
+                  <SelectTrigger className="h-12 w-[100px] rounded-2xl border-none bg-muted/50 font-bold text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="rounded-2xl border-none shadow-2xl">
+                    {["10", "25", "50", "100", "All"].map((v) => (
+                      <SelectItem key={v} value={v} className="font-bold py-3 rounded-xl">{v}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline" className="h-12 rounded-2xl font-black uppercase tracking-widest text-[10px] gap-3 border-none bg-muted/50 px-6">
+                      <Download className="h-4 w-4 text-primary" />
+                      Export
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-48 rounded-[1.5rem] border-none shadow-2xl p-2 bg-background/95 backdrop-blur-md">
+                    <DropdownMenuItem className="gap-3 py-3 px-4 cursor-pointer rounded-xl hover:bg-primary/5 transition-colors group">
+                      <FileText className="h-4 w-4 text-rose-500 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-black uppercase tracking-widest">PDF</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem className="gap-3 py-3 px-4 cursor-pointer rounded-xl hover:bg-primary/5 transition-colors group">
+                      <FileText className="h-4 w-4 text-blue-500 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-black uppercase tracking-widest">CSV</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem className="gap-3 py-3 px-4 cursor-pointer rounded-xl hover:bg-primary/5 transition-colors group">
+                      <Printer className="h-4 w-4 text-slate-600 group-hover:scale-110 transition-transform" />
+                      <span className="text-xs font-black uppercase tracking-widest">Print</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+
+                <Dialog open={bulkActionOpen} onOpenChange={(open) => {
+                  if (open && selectedExpenses.length === 0) {
+                    toast({ title: "Error", description: "Please select at least one expense first."});
+                    return;
+                  }
+                  setBulkState({ massDelete: false }); // clear unsaved bulk choices on open/close
+                  setBulkActionOpen(open);
+                }}>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" className="h-12 rounded-2xl font-black uppercase tracking-widest text-[10px] gap-3 border-none bg-muted/50 px-6">
+                      Bulk Actions
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-md rounded-3xl p-6">
+                    <DialogHeader>
+                      <DialogTitle className="font-black text-xl">Bulk Actions</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-5 pt-4">
+                      <div className="flex items-center space-x-2">
+                        <Checkbox 
+                          id="massDelete" 
+                          className="border-red-500 data-[state=checked]:bg-red-500"
+                          checked={bulkState.massDelete}
+                          onCheckedChange={(checked) => setBulkState({...bulkState, massDelete: checked as boolean})}
+                        />
+                        <Label htmlFor="massDelete" className="text-red-600 font-bold uppercase tracking-widest text-[10px]">Mass Delete</Label>
+                      </div>
+                      <div className="flex justify-end gap-2 pt-4 border-t mt-4">
+                        <Button variant="ghost" className="rounded-xl font-bold" onClick={() => setBulkActionOpen(false)}>Cancel</Button>
+                        <Button className="rounded-xl font-bold bg-primary" onClick={handleBulkAction} disabled={!bulkState.massDelete || isBulkLoading}>
+                          {isBulkLoading ? "Processing..." : "Confirm"}
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              </div>
+
+              <div className="relative w-full md:w-96 group">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
+                <Input
+                  placeholder="Search expenses..."
+                  className="pl-12 h-12 rounded-2xl border-none bg-muted/50 font-bold text-xs focus-visible:ring-primary/20 transition-all"
+                  value={search}
+                  onChange={(e) => { setSearch(e.target.value); setCurrentPage(1); }}
+                />
+              </div>
+            </div>
+
+            {/* Table */}
+            <TableContainer>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
+                      <Checkbox
+                        checked={allExpensePageSelected}
+                        onCheckedChange={() => {
+                          const pageIds = paginatedExpenses.map((e: any) => e._id);
+                          setSelectedExpenses(prev =>
+                            allExpensePageSelected ? prev.filter((id: string) => !pageIds.includes(id)) : [...new Set([...prev, ...pageIds])]
+                          );
+                        }}
+                      />
+                    </TableHead>
+                    <TableHead>Category</TableHead>
+                    <TableHead>Amount</TableHead>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Receipt</TableHead>
+                    <TableHead>Date</TableHead>
+                    <TableHead>Project</TableHead>
+                    <TableHead>Invoice</TableHead>
+                    <TableHead>Reference #</TableHead>
+                    <TableHead>Payment Mode</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    Array.from({ length: 5 }).map((_, i) => (
+                      <TableRow key={i} className="animate-pulse">
+                        <TableCell colSpan={11} className="h-16">
+                          <Skeleton className="h-full w-full rounded-2xl" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  ) : filtered.length === 0 ? (
+                    <TableEmpty colSpan={11} className="py-12">
+                      <div className="flex flex-col items-center gap-3 not-italic">
+                        <Receipt className="h-10 w-10 text-muted-foreground/30" />
+                        <span>No records found.</span>
+                      </div>
+                    </TableEmpty>
+                  ) : (
+                    paginatedExpenses.map((e: any) => (
+                      <TableRow key={e._id} className="group">
+                        <TableCell>
+                          <Checkbox 
+                            checked={selectedExpenses.includes(e._id)}
+                            onCheckedChange={(checked) => {
+                              if (checked) setSelectedExpenses([...selectedExpenses, e._id]);
+                              else setSelectedExpenses(selectedExpenses.filter(id => id !== e._id));
+                            }}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="rounded-lg bg-background border-none shadow-sm text-[10px] font-black uppercase tracking-widest px-3 py-1">
+                            {e.category || "General"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-sm font-black text-foreground">
+                            {formatAmount(e.amount || 0)}
+                          </span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs font-bold text-slate-600">{e.expense_name || "-"}</span>
+                        </TableCell>
+                        <TableCell>
+                          {e.receipt ? (
+                            <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg bg-background shadow-sm hover:text-primary">
+                              <Eye className="h-4 w-4" />
+                            </Button>
+                          ) : (
+                            <span className="text-[10px] font-bold text-muted-foreground/40 uppercase">No Receipt</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs font-bold text-slate-500">{e.date ? formatDate(e.date) : "-"}</span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs font-bold text-slate-600 italic">{e.project?.name || e.project || "-"}</span>
+                        </TableCell>
+                        <TableCell>
+                          {e.invoiceid ? (
+                            <Badge className="rounded-lg bg-indigo-50 text-indigo-600 border-none font-black text-[10px] tracking-tighter">
+                              {e.invoiceid?.number || "INV-MATCHED"}
+                            </Badge>
+                          ) : (
+                            <span className="text-[10px] font-bold text-muted-foreground/30 italic">N/A</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className="text-xs font-mono font-bold text-slate-400">{e.reference_no || "-"}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="rounded-lg bg-slate-100 text-slate-600 border-none text-[10px] font-bold uppercase tracking-widest">
+                            {e.paymentmode || "Cash"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-10 w-10 rounded-xl hover:bg-background shadow-none transition-all">
+                                <MoreHorizontal className="h-5 w-5 text-slate-400" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-40 rounded-xl border-none shadow-2xl p-1 bg-background/95 backdrop-blur-md">
+                              <DropdownMenuItem className="gap-3 py-2.5 px-3 cursor-pointer rounded-lg hover:bg-primary/5 transition-colors group">
+                                <Eye className="h-4 w-4 text-slate-400 group-hover:text-primary transition-colors" />
+                                <span className="text-xs font-bold">View Details</span>
+                              </DropdownMenuItem>
+                              {can("Expenses", "Edit") && (
+                                <DropdownMenuItem 
+                                  onClick={() => navigate(`/admin/expenses/edit/${e._id}`)}
+                                  className="gap-3 py-2.5 px-3 cursor-pointer rounded-lg hover:bg-primary/5 transition-colors group"
+                                >
+                                  <Edit className="h-4 w-4 text-slate-400 group-hover:text-amber-500 transition-colors" />
+                                  <span className="text-xs font-bold">Edit Expense</span>
+                                </DropdownMenuItem>
+                              )}
+                              {can("Expenses", "Delete") && (
+                                <DropdownMenuItem 
+                                  onClick={() => {
+                                    if (confirm("Are you sure you want to delete this expense?")) {
+                                      salesService.deleteExpense(e._id).then(() => {
+                                        toast({ title: "Success", description: "Expense deleted" });
+                                        queryClient.invalidateQueries({ queryKey: ["expenses"] });
+                                      }).catch(err => {
+                                        toast({ title: "Error", description: err.message, variant: "destructive" });
+                                      });
+                                    }
+                                  }}
+                                  className="gap-3 py-2.5 px-3 cursor-pointer rounded-lg hover:bg-rose-50 transition-colors group"
+                                >
+                                  <Trash2 className="h-4 w-4 text-slate-400 group-hover:text-rose-500 transition-colors" />
+                                  <span className="text-xs font-bold text-rose-500">Delete</span>
+                                </DropdownMenuItem>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+              <TablePagination page={safeExpensePage} pageSize={expensePageSize} total={filtered.length} onPageChange={setCurrentPage} />
+            </TableContainer>
+          </CardContent>
+        </Card>
+      </div>
+    </DashboardLayout>
+  );
+};
+
+export default Expenses;

@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment files (keep only the example templates)
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Test output
+test-results/
+coverage/
+
+# Build output
+dist/
+build/
+
+# Data / spreadsheets (may contain real staff or customer data)
+*.xlsx
+*.xls
+
+# Old sync workflow from another repo (not needed here)
+sync-to-fuerte.yml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

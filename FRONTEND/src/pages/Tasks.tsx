@@ -1,0 +1,1546 @@
+import { useState, useMemo, useEffect } from "react";
+import { useOpenCreateModal } from "@/hooks/useOpenCreateModal";
+import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+  DialogFooter,
+  DialogClose,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+import { RichTextEditor } from "@/components/shared/RichTextEditor";
+import {
+  Plus, Search, HelpCircle,
+  List, Paperclip,
+  KanbanSquare, Mic, X, Zap
+} from "lucide-react";
+import { ExportButton } from "@/components/ui/export-button";
+import { ImportButton } from "@/components/ui/import-button";
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { projectService } from "@/api/services/project.service";
+import { utilityService } from "@/api/services/utility.service";
+import { taskService } from "@/api/services/task.service";
+import { fileService } from "@/api/services/file.service";
+import { InlineVoiceRecorder, AttachedVoicePreview } from "@/components/tasks/TaskVoiceNotes";
+import { staffService } from "@/api/services/staff.service";
+import { formatDate } from "@/lib/dateFormat";
+import { TableActions } from "@/components/TableActions";
+import { useToast } from "@/hooks/use-toast";
+import { Skeleton } from "@/components/ui/skeleton";
+import { SkeletonTableRows } from "@/components/ui/skeleton-table-rows";
+import { usePermissions } from "@/hooks/usePermissions";
+import { isTrinetraPilotUser } from "@/lib/trinetraPilot";
+import { hrmsbranchService } from "@/hrms/services/hrmsbranchService";
+import { useNavigate, Link, useSearchParams } from "react-router-dom";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { customerService } from "@/api/services/customer.service";
+import { TaskViewModal } from "@/components/tasks/TaskViewModal";
+import { InquiryOutcomeDialog } from "@/components/tasks/InquiryOutcomeDialog";
+import { TasksKanban, type KanbanTask } from "@/pages/TasksKanban";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell, TableEmpty, TablePagination } from "@/components/ui/table";
+import { defaultPageSize } from "@/lib/tablePageSize";
+
+export const taskStatusConfig = [
+  { id: 1, label: "Not Started", bg: "bg-slate-100", text: "text-slate-700", border: "border-slate-200" },
+  { id: 2, label: "In Progress", bg: "bg-blue-50", text: "text-blue-700", border: "border-blue-200" },
+  { id: 3, label: "Testing", bg: "bg-purple-50", text: "text-purple-700", border: "border-purple-200" },
+  { id: 4, label: "Awaiting Feedback", bg: "bg-yellow-50", text: "text-yellow-700", border: "border-yellow-200" },
+  { id: 5, label: "Complete", bg: "bg-green-50", text: "text-green-700", border: "border-green-200" },
+];
+
+const priorityColors: Record<number, string> = {
+  1: "bg-green-50 text-green-700 border-green-200",
+  2: "bg-yellow-50 text-yellow-700 border-yellow-200",
+  3: "bg-orange-50 text-orange-700 border-orange-200",
+  4: "bg-red-50 text-red-700 border-red-200",
+};
+
+const priorityLabels: Record<number, string> = {
+  1: "Low",
+  2: "Medium",
+  3: "High",
+  4: "Urgent",
+};
+
+const Tasks = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = searchParams.get("view") === "kanban" ? "kanban" : "list";
+  const [formData, setFormData] = useState({
+    public: false,
+    billable: false,
+    name: "",
+    hourly_rate: "",
+    related_to: "",
+    rel_id: "",
+    startdate: "",
+    duedate: "",
+    priority: "2",
+    repeat_every: "none",
+    tags: "",
+    description: "",
+    status: 1,
+    assignees: [],
+    followers: [],
+    category: "To-Do",
+    inquiry_outcome: "",
+    branch: ""
+  });
+
+  const handleInputChange = (e: any) => {
+    const { id, value, type, checked } = e.target;
+    setFormData(prev => ({ ...prev, [id]: type === 'checkbox' ? checked : value }));
+  };
+
+  const handleSelectChange = (field: string, value: any) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => clearTimeout(t);
+  }, [search]);
+  const [activeStatus, setActiveStatus] = useState<number | "all">("all");
+  const [activeCategory, setActiveCategory] = useState<string>("all");
+  const [itemsPerPage, setItemsPerPage] = useState<number | "all">(() => defaultPageSize(25));
+  const [currentPage, setCurrentPage] = useState(1);
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearch, activeStatus, activeCategory]);
+  const [showAttachment, setShowAttachment] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
+  useOpenCreateModal(() => setIsNewTaskModalOpen(true));
+  const [editingTask, setEditingTask] = useState<any>(null);
+  const [selectedViewTask, setSelectedViewTask] = useState<any>(null);
+  const [isViewModalOpen, setIsViewModalOpen] = useState(false);
+  const [selectedTasks, setSelectedTasks] = useState<string[]>([]);
+  const [outcomeTask, setOutcomeTask] = useState<any>(null);
+  const [bulkActionOpen, setBulkActionOpen] = useState(false);
+  const [bulkState, setBulkState] = useState({
+    massDelete: false,
+    status: "",
+    priority: "",
+    assignee: "",
+    billable: "",
+    tags: ""
+  });
+  const [isBulkLoading, setIsBulkLoading] = useState(false);
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const { can, user, isStaff, isAdmin, isModuleEnabled } = usePermissions();
+  const isPilot = isTrinetraPilotUser(user?.email);
+  // Branch is sourced from the HRMS module — only show/fetch it when the
+  // tenant's plan actually includes HRMS, even for a pilot-flagged user.
+  const canUseBranch = isPilot && isModuleEnabled("hrms");
+  const { data: branchesRaw = [] } = useQuery<any[]>({
+    queryKey: ["hrms-branches-list"],
+    queryFn: () => hrmsbranchService.getAll().then((r) => r.data || []),
+    enabled: canUseBranch,
+    staleTime: 5 * 60 * 1000,
+  });
+  const branches: { _id: string; name: string }[] = branchesRaw;
+  const navigate = useNavigate();
+
+  // Todos are a small, personal-scale list (not a growing tenant-wide
+  // collection like Tasks) — kept as a full fetch, filtered client-side.
+  const { data: todos = [], isLoading: todosLoading } = useQuery<any[]>({
+    queryKey: ["todos"],
+    queryFn: utilityService.getTodos,
+  });
+
+  const normalizedTodos = useMemo(
+    () =>
+      todos.map((todo: any) => ({
+        ...todo,
+        name: todo.description,
+        displayStatus: todo.finished ? 5 : 1,
+        displayPriority: 2,
+        isTodo: true,
+      })),
+    [todos]
+  );
+
+  const filteredTodos = useMemo(() => {
+    const q = debouncedSearch.toLowerCase();
+    return normalizedTodos.filter((t: any) => {
+      const matchesSearch = !q || (t.name || "").toLowerCase().includes(q);
+      const matchesStatus = activeStatus === "all" || t.displayStatus === activeStatus;
+      // Todos have no `category` — they only ever count as "To-Do".
+      const matchesCategory = activeCategory === "all" || activeCategory === "To-Do";
+      return matchesSearch && matchesStatus && matchesCategory;
+    });
+  }, [normalizedTodos, debouncedSearch, activeStatus, activeCategory]);
+
+  // Tasks appear before Todos in the combined list (matching the order this
+  // page has always used). Fetching exactly `itemsPerPage` tasks starting at
+  // `pageStart` naturally comes back short once the page runs past the end
+  // of the (filtered) task collection — that shortfall is how many Todos
+  // need to fill the rest of the page, no separate lookup required.
+  const pageStart = itemsPerPage === "all" ? 0 : (currentPage - 1) * itemsPerPage;
+
+  // `staffMembers` isn't fetched yet the first time this runs, but the
+  // query below re-filters as soon as it lands (it's a dependency wherever
+  // this is used inside a useMemo/useQuery).
+  const taskAssigneeNamesMatch = (t: any, q: string, staff: any[]) => {
+    if (!q || !Array.isArray(t.assignees) || t.assignees.length === 0) return false;
+    return t.assignees.some((a: any) => {
+      const staffId = typeof a === "object" ? a?._id : a;
+      const member = typeof a === "object" && a?.firstname ? a : staff.find((s: any) => s._id === staffId);
+      const name = member ? `${member.firstname || ""} ${member.lastname || ""}`.trim() : "";
+      return name.toLowerCase().includes(q);
+    });
+  };
+
+  const taskMatchesFilters = (t: any, q: string) => {
+    const matchesSearch =
+      !q ||
+      (t.name || "").toLowerCase().includes(q) ||
+      (t.category || "").toLowerCase().includes(q) ||
+      (Array.isArray(t.tags) ? t.tags.join(" ") : (t.tags || "")).toLowerCase().includes(q) ||
+      (typeof t.branch === "object" ? (t.branch?.name || "") : (t.branch || "")).toLowerCase().includes(q) ||
+      taskAssigneeNamesMatch(t, q, staffMembers);
+    const displayStatus = t.status || 1;
+    const matchesStatus = activeStatus === "all" || displayStatus === activeStatus;
+    const matchesCategory = activeCategory === "all" || (t.category || "To-Do") === activeCategory;
+    return matchesSearch && matchesStatus && matchesCategory;
+  };
+
+  interface TasksPage { rows: any[]; total: number; statusCounts: Record<number, number> }
+  const { data: tasksResult, isLoading: tasksLoading } = useQuery<TasksPage>({
+    queryKey: ["tasks", itemsPerPage, currentPage, debouncedSearch, activeStatus, activeCategory],
+    queryFn: async () => {
+      if (itemsPerPage === "all") {
+        // "All" keeps the legacy full fetch, filtered client-side exactly
+        // as this page always has — the paginated endpoint's 500-row cap
+        // wouldn't be a true "everything" view for a large tenant.
+        const response: any = await projectService.getTasks();
+        const rows: any[] = Array.isArray(response) ? response : response?.data || [];
+        const q = debouncedSearch.toLowerCase();
+        const rowsFiltered = rows.filter((t: any) => taskMatchesFilters(t, q));
+        const statusCounts: Record<number, number> = {};
+        rows.forEach((t: any) => {
+          const s = t.status || 1;
+          statusCounts[s] = (statusCounts[s] || 0) + 1;
+        });
+        return { rows: rowsFiltered, total: rowsFiltered.length, statusCounts };
+      }
+
+      const res: any = await projectService.getTasks({
+        skip: pageStart,
+        limit: itemsPerPage,
+        search: debouncedSearch || undefined,
+        status: activeStatus !== "all" ? activeStatus : undefined,
+        category: activeCategory !== "all" ? activeCategory : undefined,
+      });
+      if (Array.isArray(res)) return { rows: [], total: 0, statusCounts: {} };
+      const statusCounts: Record<number, number> = {};
+      (res?.statusCounts ?? []).forEach((s: any) => {
+        statusCounts[s.status] = s.count;
+      });
+      return { rows: res?.data ?? [], total: res?.total ?? 0, statusCounts };
+    },
+    placeholderData: keepPreviousData,
+  });
+  const totalTasks = tasksResult?.total ?? 0;
+  const tasksOnPage: any[] = tasksResult?.rows ?? [];
+
+  const { data: staffMembers = [] } = useQuery<any[]>({
+    queryKey: ["staff", "assignable"],
+    queryFn: staffService.getAssignable,
+  });
+
+  const { data: customers = [] } = useQuery<any[]>({
+    queryKey: ["customers"],
+    queryFn: customerService.getAll,
+  });
+
+  const { data: projects = [] } = useQuery<any[]>({
+    queryKey: ["projects"],
+    queryFn: async () => {
+      const res: any = await projectService.getAll();
+      return Array.isArray(res) ? res : res?.data || [];
+    },
+  });
+
+  const projectOptions = useMemo(() =>
+    projects.map((p: any) => ({
+      label: p.name || `Project #${p._id}`,
+      value: p._id
+    })),
+    [projects]
+  );
+
+  const filteredCustomers = useMemo(() => {
+    if (!canUseBranch) return customers;
+    if (!formData.branch) return [];
+    const targetBranch = formData.branch.toLowerCase().trim();
+    const branchObj = branches.find((b: any) => b.name && b.name.toLowerCase().trim() === targetBranch);
+    return customers.filter((c: any) => {
+      const cBranchName = typeof c.branch === "object" ? c.branch?.name : c.branch;
+      const cBranchId = typeof c.branch === "object" ? (c.branch?._id || c.branch?.id) : c.branch;
+      if (cBranchName && typeof cBranchName === "string" && cBranchName.toLowerCase().trim() === targetBranch) {
+        return true;
+      }
+      if (branchObj && cBranchId && String(cBranchId) === String(branchObj._id)) {
+        return true;
+      }
+      return false;
+    });
+  }, [customers, formData.branch, canUseBranch, branches]);
+
+  const customerOptions = useMemo(() =>
+    filteredCustomers.map((c: any) => ({
+      label: c.company || `${c.firstname || ''} ${c.lastname || ''}`.trim() || c.email,
+      value: c._id
+    }))
+    , [filteredCustomers]);
+
+  const staffOptions = useMemo(() =>
+    staffMembers.map((member: any) => ({
+      label: `${member.firstname || ''} ${member.lastname || ''}`.trim() || member.email,
+      value: member._id
+    }))
+    , [staffMembers]);
+
+  const isLoading = tasksLoading || todosLoading;
+
+  // The staff-only-sees-own-tasks restriction is still applied client-side,
+  // same as before pagination — it now narrows a page at a time rather than
+  // the whole tenant fetch, so a restricted user's page can render fewer
+  // than `itemsPerPage` rows (a pre-existing limitation, not a regression).
+  const scopedTasksOnPage = useMemo(() => {
+    if (!(isStaff && !isAdmin && user?._id)) return tasksOnPage;
+    const currentUserId = String(user._id);
+    return tasksOnPage.filter((t: any) => {
+      const isAssigned = Array.isArray(t.assignees) && t.assignees.some((a: any) =>
+        String(typeof a === 'object' ? a?._id || a?.value : a) === currentUserId
+      );
+      const isFollower = Array.isArray(t.followers) && t.followers.some((f: any) =>
+        String(typeof f === 'object' ? f?._id || f?.value : f) === currentUserId
+      );
+      const isCreator = String(typeof t.created_by === 'object' ? t.created_by?._id : t.created_by) === currentUserId;
+      return isAssigned || isFollower || isCreator;
+    });
+  }, [tasksOnPage, isStaff, isAdmin, user?._id]);
+
+  const normalizedTasksOnPage = useMemo(
+    () =>
+      scopedTasksOnPage.map((t: any) => ({
+        ...t,
+        displayStatus: t.status || 1,
+        displayPriority: t.priority || 2,
+        isTodo: false,
+      })),
+    [scopedTasksOnPage]
+  );
+
+  // How many Todos fill the rest of this page: the task fetch above already
+  // returns fewer than `itemsPerPage` rows once it runs past the end of the
+  // (filtered) task collection, so that shortfall is exactly the Todo count
+  // needed, starting from wherever the previous page(s) left off. "All"
+  // mode already has every task loaded, so every todo joins them too.
+  const todosNeeded = itemsPerPage === "all" ? filteredTodos.length : Math.max(0, itemsPerPage - tasksOnPage.length);
+  const todoStart = itemsPerPage === "all" ? 0 : Math.max(0, pageStart - totalTasks);
+  const todoSlice = filteredTodos.slice(todoStart, todoStart + todosNeeded);
+
+  const filteredTasks = [...normalizedTasksOnPage, ...todoSlice];
+
+  // Independent of the currently active search/status/category filters —
+  // matches prior behavior (computed from the full, unfiltered list).
+  const stats = useMemo(() => {
+    const todoCounts: Record<number, number> = {};
+    normalizedTodos.forEach((t: any) => {
+      todoCounts[t.displayStatus] = (todoCounts[t.displayStatus] || 0) + 1;
+    });
+    return taskStatusConfig.map((status) => ({
+      ...status,
+      count: (tasksResult?.statusCounts?.[status.id] || 0) + (todoCounts[status.id] || 0),
+    }));
+  }, [tasksResult, normalizedTodos]);
+
+  const deleteMutation = useMutation({
+    mutationFn: ({ id, isTodo }: { id: string; isTodo: boolean }) =>
+      isTodo ? utilityService.deleteTodo(id) : taskService.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["todos"] });
+      toast({ title: "Success", description: "Task deleted successfully" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async (data: any) => {
+      const res = await taskService.create(data);
+      const taskId = res?._id || res?.data?._id;
+      if (taskId && attachedFiles.length > 0) {
+        try {
+          await fileService.uploadFiles(taskId, "task", attachedFiles);
+        } catch (uploadErr: any) {
+          console.error("Failed to upload attached files/voice notes:", uploadErr);
+          toast({ title: "Task saved, attachments not uploaded", description: uploadErr?.message || "Failed to upload files.", variant: "destructive" });
+        }
+      }
+      return res;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["todos"] });
+      toast({ title: "Success", description: "Task created successfully" });
+      handleCloseModal();
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const importTasksMutation = useMutation({
+    mutationFn: taskService.importTasks,
+    onSuccess: async (data: any) => {
+      setActiveStatus("all");
+      setSearch("");
+      setCurrentPage(1);
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      await queryClient.refetchQueries({ queryKey: ["tasks"] });
+      toast({
+        title: data.count === 0 ? "No Tasks Imported" : "Import Successful",
+        description: data.message || "Imported tasks",
+        variant: data.count === 0 ? "destructive" : "default",
+      });
+    },
+    onError: (err: any) => {
+      toast({ title: "Import Failed", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const normalizeKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  const getField = (row: any, ...candidates: string[]) => {
+    const normalizedRow: Record<string, any> = {};
+    Object.keys(row).forEach((k) => { normalizedRow[normalizeKey(k)] = row[k]; });
+    for (const candidate of candidates) {
+      const val = normalizedRow[normalizeKey(candidate)];
+      if (val !== undefined && val !== null && String(val).trim() !== "") return val;
+    }
+    return "";
+  };
+
+  const processTaskRows = (rows: any[]) => {
+    const statusNameToId: Record<string, number> = {};
+    taskStatusConfig.forEach(s => { statusNameToId[s.label.toLowerCase()] = s.id; });
+    const priorityNameToId: Record<string, number> = {};
+    Object.entries(priorityLabels).forEach(([id, label]) => { priorityNameToId[String(label).toLowerCase()] = Number(id); });
+
+    const tasksData = rows.map((row: any) => {
+      const rawStatus = getField(row, "status");
+      const rawPriority = getField(row, "priority");
+      return {
+        name: getField(row, "name", "subject", "task", "taskname", "task name"),
+        description: getField(row, "description"),
+        status: statusNameToId[String(rawStatus).toLowerCase().trim()] ?? (Number(rawStatus) || 1),
+        priority: priorityNameToId[String(rawPriority).toLowerCase().trim()] ?? (Number(rawPriority) || 2),
+        startdate: getField(row, "startdate", "start date"),
+        duedate: getField(row, "duedate", "due date"),
+      };
+    });
+
+    const validTasks = tasksData.filter(t => t.name);
+    if (validTasks.length === 0) {
+      toast({ title: "Error", description: "No valid tasks found. Make sure a 'Name', 'Subject', or 'Task Name' column exists.", variant: "destructive" });
+      return;
+    }
+    importTasksMutation.mutate(validTasks as any);
+  };
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, isTodo, data }: { id: string; isTodo: boolean; data: any }) =>
+      isTodo ? utilityService.updateTodo(id, data) : taskService.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["todos"] });
+      toast({ title: "Success", description: "Task updated successfully" });
+      handleCloseModal();
+    },
+    onError: (err: any) => {
+      toast({ title: "Error", description: err.response?.data?.message || err.message, variant: "destructive" });
+    }
+  });
+
+  const handleBulkAction = async () => {
+    if (selectedTasks.length === 0) {
+      toast({ title: "Error", description: "No tasks selected." });
+      return;
+    }
+    setIsBulkLoading(true);
+
+    try {
+      // Todos are always fully loaded client-side (a small, personal-scale
+      // list), so membership there reliably tells a todo apart from a task
+      // even for a selected id that's no longer on the current task page.
+      const isTodoId = (id: string) => normalizedTodos.some((t: any) => t._id === id);
+
+      if (bulkState.massDelete) {
+        await Promise.all(selectedTasks.map(id => {
+          return isTodoId(id) ? utilityService.deleteTodo(id) : taskService.delete(id);
+        }));
+        toast({ title: "Success", description: `Deleted ${selectedTasks.length} tasks.` });
+      } else {
+        const updates: any = {};
+        if (bulkState.status) updates.status = parseInt(bulkState.status);
+        if (bulkState.priority) updates.priority = parseInt(bulkState.priority);
+        if (bulkState.assignee) updates.assignees = [bulkState.assignee];
+        if (bulkState.tags) updates.tags = bulkState.tags.split(",").map(s => s.trim());
+        if (bulkState.billable) updates.billable = bulkState.billable === "yes";
+
+        if (Object.keys(updates).length > 0) {
+          await Promise.all(selectedTasks.map(id => {
+            if (isTodoId(id)) {
+              const todoUpdates: any = {};
+              if (bulkState.status === "5") todoUpdates.finished = true;
+              else if (bulkState.status) todoUpdates.finished = false;
+              return utilityService.updateTodo(id, todoUpdates);
+            } else {
+              return taskService.update(id, updates);
+            }
+          }));
+          toast({ title: "Success", description: `Updated ${selectedTasks.length} tasks.` });
+        } else {
+          toast({ title: "Warning", description: "Please select an action or field to update.", variant: "destructive" });
+          return;
+        }
+      }
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["todos"] });
+      setSelectedTasks([]);
+      setBulkActionOpen(false);
+      setBulkState({ massDelete: false, status: "", priority: "", assignee: "", billable: "", tags: "" });
+    } catch (err: any) {
+      toast({ title: "Error", description: "Failed to perform bulk action." });
+    } finally {
+      setIsBulkLoading(false);
+    }
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedTasks(paginatedTasks.map((t: any) => t._id));
+    } else {
+      setSelectedTasks([]);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setIsNewTaskModalOpen(false);
+    setEditingTask(null);
+    setFormData({
+      public: false,
+      billable: false,
+      name: "",
+      hourly_rate: "",
+      related_to: "",
+      rel_id: "",
+      startdate: "",
+      duedate: "",
+      priority: "2",
+      repeat_every: "none",
+      tags: "",
+      description: "",
+      status: 1,
+      assignees: [],
+      followers: [],
+      category: "To-Do",
+      inquiry_outcome: "",
+      branch: ""
+    });
+    setAttachedFiles([]);
+    setShowAttachment(false);
+  };
+
+  const handleEdit = (task: any) => {
+    setEditingTask(task);
+    setFormData({
+      public: task.public || false,
+      billable: task.billable || false,
+      name: task.name || "",
+      hourly_rate: task.hourly_rate?.toString() || "",
+      related_to: task.rel_type || "",
+      rel_id: task.rel_id || "",
+      startdate: task.startdate ? new Date(task.startdate).toISOString().split('T')[0] : "",
+      duedate: task.duedate ? new Date(task.duedate).toISOString().split('T')[0] : "",
+      priority: (task.priority || 2).toString(),
+      repeat_every: task.repeat_every || "none",
+      tags: task.tags ? task.tags.join(", ") : "",
+      description: task.description || "",
+      status: task.status || 1,
+      assignees: task.assignees || [],
+      followers: task.followers || [],
+      category: task.category || "To-Do",
+      inquiry_outcome: task.inquiry_outcome || "",
+      branch: typeof task.branch === "object" ? (task.branch?.name || "") : (task.branch || "")
+    });
+    setIsNewTaskModalOpen(true);
+  };
+
+  const handleView = (task: any) => {
+    setSelectedViewTask(task);
+    setIsViewModalOpen(true);
+  };
+
+  const handleInlineUpdate = (task: any, field: string, value: any) => {
+    // Closing an Inquiry task requires a Won/Lost outcome first
+    if (field === "status" && value === 5 && !task.isTodo && (task.category === "Inquiry")) {
+      setOutcomeTask(task);
+      return;
+    }
+    const payload = {
+      [field]: value
+    };
+    updateMutation.mutate({ id: task._id, isTodo: task.isTodo, data: payload });
+  };
+
+  const handleOutcomeSelect = (outcome: "Won" | "Lost") => {
+    if (!outcomeTask) return;
+    updateMutation.mutate({ id: outcomeTask._id, isTodo: false, data: { status: 5, inquiry_outcome: outcome } });
+    setOutcomeTask(null);
+  };
+
+  const handleSave = () => {
+    if (canUseBranch && !formData.branch) {
+      toast({ title: "Error", description: "Please select a branch", variant: "destructive" });
+      return;
+    }
+    if (!formData.name?.trim() || !formData.startdate) {
+      toast({ title: "Error", description: "Subject and Start Date are required fields", variant: "destructive" });
+      return;
+    }
+    if (formData.hourly_rate && parseFloat(formData.hourly_rate) < 0) {
+      toast({ title: "Error", description: "Hourly rate cannot be negative", variant: "destructive" });
+      return;
+    }
+    if (formData.duedate && formData.startdate && new Date(formData.duedate) < new Date(formData.startdate)) {
+      toast({ title: "Error", description: "Due date cannot be earlier than start date", variant: "destructive" });
+      return;
+    }
+    if (formData.related_to === 'customer' && !formData.rel_id) {
+      toast({ title: "Error", description: "Please select a customer", variant: "destructive" });
+      return;
+    }
+    if (formData.related_to === 'project' && !formData.rel_id) {
+      toast({ title: "Error", description: "Please select a project", variant: "destructive" });
+      return;
+    }
+    if (formData.category === "Inquiry" && formData.status === 5 && !formData.inquiry_outcome) {
+      toast({ title: "Error", description: "Please select Won or Lost for the closed inquiry." });
+      return;
+    }
+
+    const payload = {
+      ...formData,
+      tags: formData.tags ? formData.tags.split(',').map(t => t.trim()) : [],
+      hourly_rate: formData.hourly_rate ? parseFloat(formData.hourly_rate) : 0,
+      priority: parseInt(formData.priority),
+      inquiry_outcome: formData.inquiry_outcome || null
+    };
+
+    if (editingTask) {
+      updateMutation.mutate({ id: editingTask._id, isTodo: editingTask.isTodo, data: payload });
+    } else {
+      createMutation.mutate(payload);
+    }
+  };
+
+  // Pagination logic — `filteredTasks` (server task page + todo slice) is
+  // already exactly this page's rows, no further slicing needed.
+  const totalItems = totalTasks + filteredTodos.length;
+  const itemsPerPageNum = itemsPerPage === "all" ? Math.max(totalItems, 1) : itemsPerPage;
+  const totalPages = itemsPerPage === "all" ? 1 : Math.max(1, Math.ceil(totalItems / itemsPerPage));
+  const paginatedTasks = filteredTasks;
+
+  // Export needs the full filtered set, not just the current page — fetched
+  // on demand (the plain, unpaginated endpoint) only when the user actually
+  // exports, with the same search/status/category/staff-scope filtering
+  // this page has always applied.
+  const loadAllFilteredTasks = async () => {
+    const res: any = await projectService.getTasks();
+    const rawTasks: any[] = Array.isArray(res) ? res : res?.data ?? [];
+    let scoped = rawTasks;
+    if (isStaff && !isAdmin && user?._id) {
+      const currentUserId = String(user._id);
+      scoped = rawTasks.filter((t: any) => {
+        const isAssigned = Array.isArray(t.assignees) && t.assignees.some((a: any) =>
+          String(typeof a === 'object' ? a?._id || a?.value : a) === currentUserId
+        );
+        const isFollower = Array.isArray(t.followers) && t.followers.some((f: any) =>
+          String(typeof f === 'object' ? f?._id || f?.value : f) === currentUserId
+        );
+        const isCreator = String(typeof t.created_by === 'object' ? t.created_by?._id : t.created_by) === currentUserId;
+        return isAssigned || isFollower || isCreator;
+      });
+    }
+    const q = debouncedSearch.toLowerCase();
+    const normalized = scoped
+      .map((t: any) => ({ ...t, displayStatus: t.status || 1, displayPriority: t.priority || 2, isTodo: false }))
+      .filter((t: any) => {
+        const matchesSearch =
+          !q ||
+          (t.name || "").toLowerCase().includes(q) ||
+          (t.category || "").toLowerCase().includes(q) ||
+          (Array.isArray(t.tags) ? t.tags.join(" ") : (t.tags || "")).toLowerCase().includes(q) ||
+          (typeof t.branch === "object" ? (t.branch?.name || "") : (t.branch || "")).toLowerCase().includes(q) ||
+          taskAssigneeNamesMatch(t, q, staffMembers);
+        const matchesStatus = activeStatus === "all" || t.displayStatus === activeStatus;
+        const matchesCategory = activeCategory === "all" || (t.category || "To-Do") === activeCategory;
+        return matchesSearch && matchesStatus && matchesCategory;
+      });
+    return [...normalized, ...filteredTodos];
+  };
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6">
+        <TaskViewModal
+          isOpen={isViewModalOpen}
+          onClose={() => setIsViewModalOpen(false)}
+          task={(selectedViewTask && paginatedTasks.find((t: any) => t._id === selectedViewTask._id)) || selectedViewTask}
+          staffOptions={staffOptions}
+        />
+        <InquiryOutcomeDialog
+          isOpen={!!outcomeTask}
+          onClose={() => setOutcomeTask(null)}
+          taskName={outcomeTask?.name}
+          onSelect={handleOutcomeSelect}
+        />
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex flex-col">
+            <h1 className="text-2xl font-bold">Tasks</h1>
+            <Link to="/admin/tasks/overview" className="text-sm text-primary hover:underline font-medium">Tasks Overview</Link>
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-11 w-11 rounded-xl border-slate-200"
+                  onClick={() => setSearchParams(prev => {
+                    const next = new URLSearchParams(prev);
+                    next.set("view", view === "kanban" ? "list" : "kanban");
+                    return next;
+                  })}
+                  aria-label={view === "kanban" ? "Switch to List view" : "Switch to Kanban view"}
+                >
+                  {view === "kanban" ? <List className="h-4 w-4" /> : <KanbanSquare className="h-4 w-4" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{view === "kanban" ? "Switch to List view" : "Switch to Kanban view"}</TooltipContent>
+            </Tooltip>
+          {(isAdmin || isStaff || can("Tasks", "Create")) && (
+            <div className="flex flex-wrap gap-2 items-center">
+              {(isAdmin || can("Tasks", "Create")) && (
+                <ImportButton onData={processTaskRows} loading={importTasksMutation.isPending} label="Import Tasks" />
+              )}
+              <Dialog open={isNewTaskModalOpen} onOpenChange={(open) => (open ? setIsNewTaskModalOpen(true) : handleCloseModal())}>
+                <DialogTrigger asChild>
+                  <Button onClick={() => setEditingTask(null)} className="rounded-xl font-black gap-2 shadow-lg shadow-primary/20 px-6 h-11 uppercase text-xs tracking-widest">
+                    <Plus className="mr-2 h-4 w-4" />
+                    New Task
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-4xl max-h-[90vh] p-0 overflow-hidden flex flex-col bg-white">
+                  <DialogHeader className="p-6 bg-white border-b border-slate-100 flex-shrink-0">
+                    <DialogTitle className="text-xl font-bold text-slate-800">
+                      {editingTask ? "Edit task" : "Add new task"}
+                    </DialogTitle>
+                  </DialogHeader>
+                  <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                    {/* Top Checkboxes */}
+                    <div className="flex items-center gap-6 pb-2 border-b border-slate-200">
+                      <div className="flex items-center space-x-2">
+                        <Checkbox id="public" checked={formData.public} onCheckedChange={(checked) => setFormData(prev => ({ ...prev, public: !!checked }))} className="border-slate-300 data-[state=checked]:bg-primary h-5 w-5" />
+                        <Label htmlFor="public" className="font-bold text-sm text-slate-700 cursor-pointer">Public</Label>
+                      </div>
+                      <div className="flex items-center space-x-2">
+                        <Checkbox id="billable" checked={formData.billable} onCheckedChange={(checked) => setFormData(prev => ({ ...prev, billable: !!checked }))} className="border-slate-300 data-[state=checked]:bg-primary h-5 w-5" />
+                        <Label htmlFor="billable" className="font-bold text-sm text-slate-700 cursor-pointer">Billable</Label>
+                      </div>
+                    </div>
+
+                    <div className="space-y-6">
+                      <div className="space-y-4">
+                        <div className="flex items-center gap-4 flex-wrap">
+                          <span
+                            className="text-primary text-sm font-bold flex items-center gap-2 cursor-pointer hover:underline w-fit transition-colors"
+                            onClick={() => setShowAttachment(!showAttachment)}
+                          >
+                            <Plus className="h-4 w-4" />
+                            Attach Files
+                          </span>
+
+                          <InlineVoiceRecorder
+                            onRecorded={(voiceFile) => {
+                              setAttachedFiles((prev) => [...prev, voiceFile]);
+                              toast({ title: "Voice Note Recorded", description: "Voice note attached to this new task." });
+                            }}
+                          />
+                        </div>
+
+                        {showAttachment && (
+                          <div className="space-y-1 animate-in fade-in slide-in-from-top-2 duration-300">
+                            <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Attachment</Label>
+                            <Input
+                              type="file"
+                              multiple
+                              onChange={(e) => {
+                                if (e.target.files) {
+                                  setAttachedFiles((prev) => [...prev, ...Array.from(e.target.files!)]);
+                                }
+                              }}
+                              className="h-12 bg-white rounded-xl border-slate-200 text-sm file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/20 transition-all cursor-pointer"
+                            />
+                          </div>
+                        )}
+
+                        {attachedFiles.length > 0 && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                            {attachedFiles.map((file, idx) => {
+                              const isAudio = file.type.startsWith("audio/") || file.name.includes("voice-note");
+                              if (isAudio) {
+                                return (
+                                  <AttachedVoicePreview
+                                    key={idx}
+                                    file={file}
+                                    onRemove={() => setAttachedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                                  />
+                                );
+                              }
+                              return (
+                                <div key={idx} className="flex items-center justify-between p-2.5 rounded-xl border bg-slate-50 border-slate-200">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <Paperclip className="h-4 w-4 text-slate-400 shrink-0" />
+                                    <p className="text-xs font-bold text-slate-700 truncate">{file.name}</p>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 shrink-0"
+                                    onClick={() => setAttachedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </Button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        {canUseBranch && (
+                          <div className="col-span-2 space-y-1">
+                            <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                              <span className="text-red-500">*</span> Branch
+                            </Label>
+                            <Select
+                              value={formData.branch || "none"}
+                              onValueChange={(v) => {
+                                const val = v === "none" ? "" : v;
+                                handleSelectChange('branch', val);
+                                if (canUseBranch && formData.related_to === 'customer') {
+                                  handleSelectChange('rel_id', '');
+                                }
+                              }}
+                            >
+                              <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                                <SelectValue placeholder="Select Branch" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="none">Select Branch</SelectItem>
+                                {branches.map((b) => (
+                                  <SelectItem key={b._id} value={b.name}>{b.name}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+
+                        <div className="col-span-2 space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                            <span className="text-red-500">*</span> Subject
+                          </Label>
+                          <Input id="name" value={formData.name} onChange={handleInputChange} className="h-12 bg-white rounded-xl border-slate-200 font-medium" placeholder="e.g. Design Homepage" />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Hourly Rate</Label>
+                          <Input id="hourly_rate" value={formData.hourly_rate} onChange={handleInputChange} type="number" className="h-12 bg-white rounded-xl border-slate-200 font-medium" placeholder="0.00" />
+                        </div>
+
+                        {/* Related To */}
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Related To</Label>
+                          <Select
+                            value={formData.related_to || "none"}
+                            onValueChange={(v) => {
+                              const val = v === "none" ? "" : v;
+                              handleSelectChange('related_to', val);
+                              handleSelectChange('rel_id', '');
+                            }}
+                          >
+                            <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                              <SelectValue placeholder="Nothing Selected" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">Nothing Selected</SelectItem>
+                              <SelectItem value="project">Project</SelectItem>
+                              <SelectItem value="customer">Customer</SelectItem>
+                              <SelectItem value="invoice">Invoice</SelectItem>
+                              <SelectItem value="lead">Lead</SelectItem>
+                              <SelectItem value="estimate">Estimate</SelectItem>
+                              <SelectItem value="contract">Contract</SelectItem>
+                              <SelectItem value="proposal">Proposal</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {formData.related_to === 'project' && (
+                          <div className="space-y-1">
+                            <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                              <span className="text-red-500">*</span> Project
+                            </Label>
+                            <SearchableSelect
+                              options={projectOptions}
+                              value={formData.rel_id}
+                              onValueChange={(v) => handleSelectChange('rel_id', v)}
+                              placeholder="Search project..."
+                              className="h-12 rounded-xl border-slate-200 shadow-none bg-white"
+                            />
+                          </div>
+                        )}
+
+                        {formData.related_to === 'customer' && (
+                          <div className="space-y-1">
+                            <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                              <span className="text-red-500">*</span> Customer
+                            </Label>
+                            <SearchableSelect
+                              options={customerOptions}
+                              value={formData.rel_id}
+                              onValueChange={(v) => handleSelectChange('rel_id', v)}
+                              placeholder={canUseBranch && !formData.branch ? "Please select a branch first..." : "Search customer..."}
+                              className="h-12 rounded-xl border-slate-200 shadow-none bg-white"
+                            />
+                          </div>
+                        )}
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                            <span className="text-red-500">*</span> Start Date
+                          </Label>
+                          <Input id="startdate" value={formData.startdate} onChange={handleInputChange} type="date" className="h-12 bg-white rounded-xl border-slate-200 font-medium" />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Due Date</Label>
+                          <Input id="duedate" value={formData.duedate} onChange={handleInputChange} type="date" className="h-12 bg-white rounded-xl border-slate-200 font-medium" />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Status</Label>
+                          <Select value={formData.status.toString()} onValueChange={(v) => handleSelectChange('status', parseInt(v))}>
+                            <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                              <SelectValue placeholder="Select Status" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {taskStatusConfig.map(s => (
+                                <SelectItem key={s.id} value={s.id.toString()}>{s.label}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                            <span className="text-red-500">*</span> Category
+                          </Label>
+                          <Select value={formData.category} onValueChange={(v) => handleSelectChange('category', v)}>
+                            <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                              <SelectValue placeholder="Select Category" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="To-Do">To-Do</SelectItem>
+                              <SelectItem value="Visit">Visit</SelectItem>
+                              <SelectItem value="Unique Visit">Unique Visits</SelectItem>
+                              <SelectItem value="Trial">Trial</SelectItem>
+                              <SelectItem value="Query">Query</SelectItem>
+                              <SelectItem value="Inquiry">Inquiry</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {formData.category === "Inquiry" && formData.status === 5 && (
+                          <div className="space-y-1 col-span-2">
+                            <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest flex gap-1">
+                              <span className="text-red-500">*</span> Inquiry Outcome
+                            </Label>
+                            <Select value={formData.inquiry_outcome} onValueChange={(v) => handleSelectChange('inquiry_outcome', v)}>
+                              <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                                <SelectValue placeholder="Select Outcome" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="Won">Won</SelectItem>
+                                <SelectItem value="Lost">Lost</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Priority</Label>
+                          <Select value={formData.priority.toString()} onValueChange={(v) => handleSelectChange('priority', v)}>
+                            <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                              <SelectValue placeholder="Select Priority" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1">Low</SelectItem>
+                              <SelectItem value="2">Medium</SelectItem>
+                              <SelectItem value="3">High</SelectItem>
+                              <SelectItem value="4">Urgent</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Repeat Every</Label>
+                          <Select value={formData.repeat_every} onValueChange={(v) => handleSelectChange('repeat_every', v)}>
+                            <SelectTrigger className="h-12 bg-white rounded-xl border-slate-200 font-medium">
+                              <SelectValue placeholder="None" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">None</SelectItem>
+                              <SelectItem value="1_week">1 Week</SelectItem>
+                              <SelectItem value="2_weeks">2 Weeks</SelectItem>
+                              <SelectItem value="1_month">1 Month</SelectItem>
+                              <SelectItem value="2_months">2 Months</SelectItem>
+                              <SelectItem value="3_months">3 Months</SelectItem>
+                              <SelectItem value="6_months">6 Months</SelectItem>
+                              <SelectItem value="1_year">1 Year</SelectItem>
+                              <SelectItem value="custom">Custom</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Assignees</Label>
+                          <SearchableSelect
+                            options={staffOptions}
+                            value={formData.assignees}
+                            onValueChange={(v) => handleSelectChange('assignees', v)}
+                            multiple
+                            placeholder="Select Assignees"
+                            className="h-12 rounded-xl border-slate-200 shadow-none"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Followers</Label>
+                          <SearchableSelect
+                            options={staffOptions}
+                            value={formData.followers}
+                            onValueChange={(v) => handleSelectChange('followers', v)}
+                            multiple
+                            placeholder="Select Followers"
+                            className="h-12 rounded-xl border-slate-200 shadow-none"
+                          />
+                        </div>
+
+                        <div className="col-span-2 space-y-1">
+                          <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Tags</Label>
+                          <Input id="tags" value={formData.tags} onChange={handleInputChange} className="h-12 bg-white rounded-xl border-slate-200 font-medium" placeholder="Type and press enter..." />
+                        </div>
+                      </div>
+
+                      {/* Task Description Editor */}
+                      <div className="space-y-2">
+                        <Label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Task Description</Label>
+                        <RichTextEditor
+                          value={formData.description}
+                          onChange={(html) => setFormData((prev) => ({ ...prev, description: html }))}
+                          placeholder="Start writing task description..."
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <DialogFooter className="p-6 bg-slate-50 border-t border-slate-100 flex-shrink-0">
+                    <DialogClose asChild>
+                      <Button variant="outline" onClick={handleCloseModal} className="font-bold uppercase tracking-wider text-xs px-4 h-9 bg-white hover:bg-slate-100 border-slate-300">Close</Button>
+                    </DialogClose>
+                    <Button onClick={handleSave} className="font-bold uppercase tracking-wider text-xs px-4 h-9 bg-primary text-white hover:bg-primary/90 shadow-sm shadow-primary/20">
+                      {editingTask ? "Update" : "Save"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </div>
+          )}
+          </div>
+        </div>
+
+        {/* Real-time Status Cards */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {stats.map((status) => (
+            <Card
+              key={status.id}
+              className={`cursor-pointer transition-all hover:shadow-sm border-t-2 ${activeStatus === status.id ? 'ring-2 ring-primary border-t-primary' : 'border-t-transparent hover:border-t-primary/50'}`}
+              onClick={() => setActiveStatus(activeStatus === status.id ? "all" : status.id)}
+            >
+              <CardContent className="p-4 flex flex-col items-center justify-center text-center gap-1.5">
+                <span className={`text-sm font-extrabold uppercase tracking-tight ${status.text}`}>{status.label}</span>
+                <span className="text-[11px] text-muted-foreground font-bold bg-slate-100 px-2 py-0.5 rounded-full">My Tasks: {status.count}</span>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        {view === "kanban" ? (
+          <TasksKanban
+            tasks={filteredTasks as unknown as KanbanTask[]}
+            staff={staffMembers}
+            isLoading={isLoading}
+            onOpenTask={(task) => handleView(task)}
+            onStatusChange={(task, newStatusId) =>
+              handleInlineUpdate(
+                task,
+                task.isTodo ? "finished" : "status",
+                task.isTodo ? newStatusId === 5 : newStatusId
+              )
+            }
+          />
+        ) : (
+        <Card className="overflow-hidden">
+          <CardContent className="p-0">
+            {/* Control Bar */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 border-b gap-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Select
+                  value={itemsPerPage.toString()}
+                  onValueChange={(val) => {
+                    setItemsPerPage(val === "All" ? "all" : Number(val));
+                    setCurrentPage(1);
+                  }}
+                >
+                  <SelectTrigger className="w-[70px] h-9 text-xs font-bold bg-slate-50 border-slate-200">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10</SelectItem>
+                    <SelectItem value="25">25</SelectItem>
+                    <SelectItem value="50">50</SelectItem>
+                    <SelectItem value="100">100</SelectItem>
+                    <SelectItem value="All">All</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={activeCategory}
+                  onValueChange={(val) => {
+                    setActiveCategory(val);
+                    setCurrentPage(1);
+                  }}
+                >
+                  <SelectTrigger className="w-[140px] h-9 text-xs font-bold bg-slate-50 border-slate-200">
+                    <SelectValue placeholder="Category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Categories</SelectItem>
+                    <SelectItem value="To-Do">To-Do</SelectItem>
+                    <SelectItem value="Visit">Visit</SelectItem>
+                    <SelectItem value="Unique Visit">Unique Visits</SelectItem>
+                    <SelectItem value="Trial">Trial</SelectItem>
+                    <SelectItem value="Query">Query</SelectItem>
+                    <SelectItem value="Inquiry">Inquiry</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <ExportButton
+                  data={loadAllFilteredTasks}
+                  filename="tasks"
+                  columns={[
+                    { header: "Task Name", key: "name" },
+                    { header: "Type", key: (t) => t.isTodo ? "Personal Todo" : "Task" },
+                    { header: "Category", key: (t) => t.category || "To-Do" },
+                    { header: "Status", key: (t) => taskStatusConfig.find(s => s.id === t.displayStatus)?.label || "Not Started" },
+                    { header: "Start Date", key: (t) => t.startdate ? formatDate(t.startdate) : "-" },
+                    { header: "Due Date", key: (t) => t.duedate ? formatDate(t.duedate) : "-" },
+                    { header: "Tags", key: (t) => t.tags ? t.tags.join(", ") : "" },
+                    { header: "Priority", key: (t) => priorityLabels[t.displayPriority] || "Medium" },
+                    ...(canUseBranch ? [{ header: "Branch", key: (t: any) => typeof t.branch === "object" ? (t.branch?.name || "-") : (t.branch || "-") }] : []),
+                  ]}
+                />
+
+                <Dialog open={bulkActionOpen} onOpenChange={(open) => {
+                  if (open && selectedTasks.length === 0) {
+                    toast({ title: "Error", description: "Please select at least one task first." });
+                    return;
+                  }
+                  setBulkState({ massDelete: false, status: "", priority: "", assignee: "", billable: "", tags: "" }); // clear unsaved bulk choices on open/close
+                  setBulkActionOpen(open);
+                }}>
+                  <DialogTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-9 px-3 sm:h-11 sm:px-6 rounded-xl gap-2 font-black uppercase text-[10px] tracking-widest bg-card border-border/60 hover:bg-primary/5 hover:border-primary/40 hover:text-primary transition-all">
+                      <Zap className="h-3.5 w-3.5 text-primary" />
+                      <span className="hidden sm:inline">Bulk Actions</span>
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Bulk Actions</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-5 pt-4">
+                      <div className="flex items-center space-x-2">
+                        <Checkbox
+                          id="massDelete"
+                          className="border-red-500 data-[state=checked]:bg-red-500"
+                          checked={bulkState.massDelete}
+                          onCheckedChange={(checked) => setBulkState({ ...bulkState, massDelete: checked as boolean })}
+                        />
+                        <Label htmlFor="massDelete" className="text-red-600 font-bold">Mass Delete</Label>
+                      </div>
+                      <div className="grid grid-cols-1 gap-5 mt-2 pt-5 border-t">
+                        <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase tracking-wider text-slate-500">Status</Label>
+                          <Select value={bulkState.status} onValueChange={(val) => setBulkState({ ...bulkState, status: val })} disabled={bulkState.massDelete}>
+                            <SelectTrigger className="h-10"><SelectValue placeholder="Select Status" /></SelectTrigger>
+                            <SelectContent>
+                              {taskStatusConfig.map(s => (
+                                <SelectItem key={s.id} value={s.id.toString()}>{s.label}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase tracking-wider text-slate-500">Priority</Label>
+                          <Select value={bulkState.priority} onValueChange={(val) => setBulkState({ ...bulkState, priority: val })} disabled={bulkState.massDelete}>
+                            <SelectTrigger className="h-10"><SelectValue placeholder="Select Priority" /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="1">Low</SelectItem>
+                              <SelectItem value="2">Medium</SelectItem>
+                              <SelectItem value="3">High</SelectItem>
+                              <SelectItem value="4">Urgent</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <Label className="text-xs font-bold uppercase tracking-wider text-slate-500">Assigned to</Label>
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <HelpCircle className="h-3.5 w-3.5 text-blue-500 cursor-help" />
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs p-3">
+                                  <p className="text-xs leading-relaxed">If the task is linked to project and the staff member you are assigning the task to is not project member this staff will be auto added as member.</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          </div>
+                          <Select value={bulkState.assignee} onValueChange={(val) => setBulkState({ ...bulkState, assignee: val })} disabled={bulkState.massDelete}>
+                            <SelectTrigger className="h-10"><SelectValue placeholder="Select Member" /></SelectTrigger>
+                            <SelectContent>
+                              {staffOptions.map((s: any) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase tracking-wider text-slate-500">Billable</Label>
+                          <Select value={bulkState.billable} onValueChange={(val) => setBulkState({ ...bulkState, billable: val })} disabled={bulkState.massDelete}>
+                            <SelectTrigger className="h-10"><SelectValue placeholder="Select Option" /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="yes">Yes</SelectItem>
+                              <SelectItem value="no">No</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label className="text-xs font-bold uppercase tracking-wider text-slate-500">Tags</Label>
+                          <Input
+                            placeholder="Enter tags separated by commas"
+                            className="h-10"
+                            value={bulkState.tags}
+                            onChange={(e) => setBulkState({ ...bulkState, tags: e.target.value })}
+                            disabled={bulkState.massDelete}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <DialogFooter className="mt-6 border-t pt-4">
+                      <DialogClose asChild>
+                        <Button variant="outline" className="font-bold uppercase tracking-wider text-xs">Close</Button>
+                      </DialogClose>
+                      <Button
+                        className="font-bold uppercase tracking-wider text-xs bg-slate-900 text-white hover:bg-slate-800"
+                        onClick={handleBulkAction}
+                        disabled={isBulkLoading}
+                      >
+                        {isBulkLoading ? "Processing..." : "Confirm"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                {(search.trim() || activeStatus !== "all" || activeCategory !== "all") && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSearch("");
+                      setActiveStatus("all");
+                      setActiveCategory("all");
+                      setCurrentPage(1);
+                    }}
+                    className="h-9 text-xs text-muted-foreground hover:text-foreground font-semibold"
+                  >
+                    Clear Filters
+                  </Button>
+                )}
+                <div className="relative w-full sm:w-auto">
+                  <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                  <Input
+                    placeholder="Search tasks..."
+                    className="pl-9 h-9 w-full sm:w-[250px] text-sm bg-slate-50 border-slate-200 focus-visible:ring-primary/20"
+                    value={search}
+                    onChange={(e) => {
+                      setSearch(e.target.value);
+                      setCurrentPage(1);
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <Table className="min-w-[1000px]">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
+                      <Checkbox
+                        className="border-slate-300"
+                        checked={paginatedTasks.length > 0 && selectedTasks.length === paginatedTasks.length}
+                        onCheckedChange={handleSelectAll}
+                      />
+                    </TableHead>
+                    <TableHead className="w-16">#</TableHead>
+                    <TableHead className="min-w-[200px]">Name</TableHead>
+                    <TableHead>Category</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Start Date</TableHead>
+                    <TableHead>Due Date</TableHead>
+                    <TableHead>Assigned to</TableHead>
+                    {canUseBranch && <TableHead>Branch</TableHead>}
+                    <TableHead>Tags</TableHead>
+                    <TableHead>Priority</TableHead>
+                    <TableHead className="sticky right-0 bg-muted/90 backdrop-blur-sm z-10 text-right shadow-[-6px_0_10px_-4px_rgba(0,0,0,0.06)] border-l border-border/40">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    <SkeletonTableRows rows={6} colSpan={canUseBranch ? 12 : 11} />
+                  ) : paginatedTasks.length === 0 ? (
+                    <TableEmpty colSpan={canUseBranch ? 12 : 11}>No tasks found.</TableEmpty>
+                  ) : (
+                    paginatedTasks.map((task, index) => {
+                      const status = taskStatusConfig.find(s => s.id === task.displayStatus) || taskStatusConfig[0];
+                      const priorityColor = priorityColors[task.displayPriority] || priorityColors[2];
+                      const priorityLabel = priorityLabels[task.displayPriority] || "Medium";
+
+                      return (
+                        <TableRow key={task._id} className="group">
+                          <TableCell>
+                            <Checkbox
+                              className="border-slate-300 data-[state=checked]:bg-primary"
+                              checked={selectedTasks.includes(task._id)}
+                              onCheckedChange={(checked) => {
+                                if (checked) setSelectedTasks([...selectedTasks, task._id]);
+                                else setSelectedTasks(selectedTasks.filter(id => id !== task._id));
+                              }}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            {(currentPage - 1) * itemsPerPageNum + index + 1}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col">
+                              <span
+                                onClick={() => handleView(task)}
+                                className="font-semibold text-primary hover:underline cursor-pointer"
+                              >
+                                {task.name}
+                              </span>
+                              {task.isTodo && <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Personal Todo</span>}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="text-[10px] font-bold uppercase tracking-wider bg-slate-50">
+                              {task.category || "To-Do"}
+                              {task.category === "Inquiry" && task.inquiry_outcome && (
+                                <span className={`ml-1 ${task.inquiry_outcome === 'Won' ? 'text-green-600' : 'text-red-600'}`}>
+                                  ({task.inquiry_outcome})
+                                </span>
+                              )}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Select
+                              value={task.displayStatus.toString()}
+                              onValueChange={(v) => handleInlineUpdate(task, task.isTodo ? 'finished' : 'status', task.isTodo ? v === '5' : parseInt(v))}
+                            >
+                              <SelectTrigger className={`h-8 w-[140px] text-[10px] font-bold uppercase tracking-wider border rounded-md ${status.bg} ${status.text} ${status.border} focus:ring-0 focus:ring-offset-0 shadow-none hover:opacity-80 transition-opacity`}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {taskStatusConfig.map(s => (
+                                  <SelectItem key={s.id} value={s.id.toString()} className="text-[10px] font-bold uppercase">{s.label}</SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </TableCell>
+                          <TableCell>
+                            {task.startdate ? formatDate(task.startdate) : "-"}
+                          </TableCell>
+                          <TableCell>
+                            {task.duedate ? formatDate(task.duedate) : "-"}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex -space-x-2">
+                              {task.assignees && task.assignees.length > 0 ? (
+                                task.assignees.map((staffId: string) => {
+                                  const staff = staffMembers.find((s: any) => s._id === staffId);
+                                  if (!staff) return null;
+                                  const initials = `${staff.firstname?.[0] || ''}${staff.lastname?.[0] || ''}`.toUpperCase() || 'ST';
+                                  return (
+                                    <TooltipProvider key={staffId}>
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <Avatar className="h-7 w-7 border-2 border-white shadow-sm transition-transform hover:z-10 hover:scale-110 cursor-help">
+                                            <AvatarFallback className="bg-primary/10 text-primary text-[10px] font-bold">
+                                              {initials}
+                                            </AvatarFallback>
+                                          </Avatar>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                          <p className="text-xs font-semibold">{staff.firstname} {staff.lastname}</p>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    </TooltipProvider>
+                                  );
+                                })
+                              ) : (
+                                <span className="text-[10px] text-slate-300 italic">None</span>
+                              )}
+                            </div>
+                          </TableCell>
+                          {canUseBranch && (
+                            <TableCell>
+                              {typeof task.branch === "object" ? (task.branch?.name || "-") : (task.branch || "-")}
+                            </TableCell>
+                          )}
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1">
+                              {task.tags && task.tags.length > 0 ? (
+                                task.tags.map((tag: string) => (
+                                  <Badge key={tag} variant="secondary" className="text-[9px] px-1.5 h-5 font-bold uppercase bg-slate-100 text-slate-600 hover:bg-slate-200">
+                                    {tag.trim()}
+                                  </Badge>
+                                ))
+                              ) : (
+                                <span className="text-[10px] text-slate-300 italic">None</span>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            {!task.isTodo ? (
+                              <Select
+                                value={task.displayPriority.toString()}
+                                onValueChange={(v) => handleInlineUpdate(task, 'priority', parseInt(v))}
+                              >
+                                <SelectTrigger className={`h-8 w-[100px] text-[10px] font-bold uppercase tracking-wider border rounded-md ${priorityColor} focus:ring-0 focus:ring-offset-0`}>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {Object.entries(priorityLabels).map(([val, label]) => (
+                                    <SelectItem key={val} value={val} className="text-[10px] font-bold uppercase">{label}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            ) : (
+                              <span className="text-xs text-slate-400">-</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="sticky right-0 bg-card/95 backdrop-blur-sm z-10 text-right shadow-[-6px_0_10px_-4px_rgba(0,0,0,0.06)] border-l border-border/40">
+                            <TableActions
+                              onView={() => handleView(task)}
+                              onEdit={(isAdmin || can("Tasks", "Edit")) ? () => handleEdit(task) : undefined}
+                              onDelete={(isAdmin || can("Tasks", "Delete")) ? () => deleteMutation.mutate({ id: task._id, isTodo: task.isTodo }) : undefined}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* Pagination */}
+            {!isLoading && filteredTasks.length > 0 && (
+              <TablePagination
+                page={currentPage}
+                pageSize={itemsPerPageNum}
+                total={totalItems}
+                onPageChange={(p) => setCurrentPage(Math.min(Math.max(1, p), Math.max(totalPages, 1)))}
+              />
+            )}
+          </CardContent>
+        </Card>
+        )}
+      </div>
+    </DashboardLayout>
+  );
+};
+
+export default Tasks;

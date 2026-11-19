@@ -1,0 +1,62 @@
+import { apiClient } from "../client";
+
+class QuotationService {
+  async getStats(quotationTypeId) {
+    return apiClient.get(quotationTypeId ? `/quotations/stats?quotation_type=${quotationTypeId}` : "/quotations/stats");
+  }
+
+  async getQuotations(limit, quotationTypeId) {
+    const params = new URLSearchParams();
+    if (limit) params.set("limit", limit);
+    if (quotationTypeId) params.set("quotation_type", quotationTypeId);
+    const qs = params.toString();
+    return apiClient.get(qs ? `/quotations?${qs}` : "/quotations");
+  }
+
+  // Server-side paginated list — used by the Quotations "List" tab.
+  // Pass { page, limit, search, quotation_type }; returns { data, total, page, pages, limit }.
+  async getQuotationsList(params = {}) {
+    const cleaned = Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""));
+    const qs = new URLSearchParams(cleaned).toString();
+    return apiClient.get(qs ? `/quotations?${qs}` : "/quotations");
+  }
+
+  async create(data) {
+    return apiClient.post("/quotations", data);
+  }
+
+  async getById(id) {
+    return apiClient.get(`/quotations/${id}`);
+  }
+
+  async update(id, data) {
+    return apiClient.put(`/quotations/${id}`, data);
+  }
+
+  async delete(id) {
+    return apiClient.delete(`/quotations/${id}`);
+  }
+
+  // Approval flow (tenant add-on "quotation_approval").
+  async requestApproval(id) {
+    return apiClient.post(`/quotations/${id}/request-approval`);
+  }
+
+  async approve(id, comment) {
+    return apiClient.post(`/quotations/${id}/approve`, { comment });
+  }
+
+  async reject(id, comment) {
+    return apiClient.post(`/quotations/${id}/reject`, { comment });
+  }
+
+  async getPendingApprovals() {
+    return apiClient.get("/quotations/approvals/pending");
+  }
+
+  async getApprovalHistory(id) {
+    return apiClient.get(`/quotations/${id}/approval-history`);
+  }
+}
+
+export const quotationService = new QuotationService();

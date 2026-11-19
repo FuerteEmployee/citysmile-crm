@@ -1,0 +1,333 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { toast } from 'sonner';
+import { usePermissionContext } from './PermissionContext';
+import { playNotificationSound } from '@/lib/soundUtils';
+import { io, Socket } from 'socket.io-client';
+import { meetingService } from '@/api/services/meeting.service';
+import { chatService } from '@/api/services/chat.service';
+import { useQuery } from '@tanstack/react-query';
+import { useRef } from 'react';
+import { quotationService } from '@/api/services/quotation.service';
+import { hasQuotationApproval } from '@/lib/quotationApproval';
+import { hasPurchaseOrders } from '@/lib/purchaseOrders';
+import { purchaseOrderService } from '@/api/services/purchaseOrder.service';
+
+export interface NotificationItem {
+  id: string;
+  title: string;
+  message: string;
+  time: string;
+  read: boolean;
+  // Where clicking this notification (toast or bell-dropdown row) should
+  // navigate to — e.g. a lead reminder deep-links straight to that lead's
+  // Reminders tab. Undefined means the notification isn't clickable.
+  link?: string;
+}
+
+interface NotificationContextType {
+  notifications: NotificationItem[];
+  unreadCount: number;
+  chatUnreadCount: number;
+  addNotification: (title: string, message: string, link?: string) => void;
+  markAllAsRead: () => void;
+  markAsRead: (id: string) => void;
+  setChatUnreadCount: React.Dispatch<React.SetStateAction<number>>;
+  // The one app-wide socket connection — exposed so other pages (e.g.
+  // Calling Agent) can attach their own listeners instead of opening a
+  // second connection just for themselves.
+  socket: Socket | null;
+}
+
+const NotificationContext = createContext<NotificationContextType>({
+  notifications: [],
+  unreadCount: 0,
+  chatUnreadCount: 0,
+  addNotification: () => {},
+  markAllAsRead: () => {},
+  markAsRead: () => {},
+  setChatUnreadCount: () => {},
+  socket: null,
+});
+
+export const NotificationProvider = ({ children }: { children: React.ReactNode }) => {
+  const { user, isStaff, can } = usePermissionContext();
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [socket, setSocket] = useState<Socket | null>(null);
+
+  const unreadCount = notifications.filter(n => !n.read).length;
+
+  useEffect(() => {
+    if (!user?._id) return;
+    const fetchChatCount = async () => {
+      try {
+        const contacts = await chatService.getContacts();
+        if (contacts && Array.isArray(contacts)) {
+          const count = contacts.reduce((acc: number, curr: any) => acc + (curr.unreadCount || 0), 0);
+          setChatUnreadCount(count);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    fetchChatCount();
+  }, [user?._id]);
+
+  // Live alerts only reach people who are online, so on login remind an
+  // approver of anything already waiting for them (once per session).
+  const approvalCanApprove = hasQuotationApproval(user) && can("Quotations", "Approve");
+  useEffect(() => {
+    if (!user?._id || !approvalCanApprove) return;
+    const key = `quotationApprovalReminded:${user._id}`;
+    try {
+      if (sessionStorage.getItem(key)) return;
+    } catch { /* storage unavailable — just remind */ }
+    quotationService.getPendingApprovals()
+      .then((list: any) => {
+        const count = Array.isArray(list) ? list.length : 0;
+        if (count > 0) {
+          addNotification(
+            "Quotations awaiting approval",
+            `${count} quotation${count === 1 ? " is" : "s are"} waiting for your approval.`,
+            `${isStaff ? "/staff" : "/admin"}/quotations?tab=approvals`,
+          );
+        }
+        try { sessionStorage.setItem(key, "1"); } catch { /* ignore */ }
+      })
+      .catch(() => { /* not critical */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?._id, approvalCanApprove]);
+
+  // Same reminder for purchase orders waiting on a PO approver.
+  const poCanApprove = hasPurchaseOrders(user) && can("Purchase Orders", "Approve");
+  useEffect(() => {
+    if (!user?._id || !poCanApprove) return;
+    const key = `poApprovalReminded:${user._id}`;
+    try {
+      if (sessionStorage.getItem(key)) return;
+    } catch { /* storage unavailable — just remind */ }
+    purchaseOrderService.pendingApprovals()
+      .then((list: any) => {
+        const count = Array.isArray(list) ? list.length : 0;
+        if (count > 0) {
+          addNotification(
+            "Purchase orders awaiting approval",
+            `${count} PO${count === 1 ? " is" : "s are"} waiting for your Yes/No.`,
+            `${isStaff ? "/staff" : "/admin"}/purchase-orders?tab=approvals`,
+          );
+        }
+        try { sessionStorage.setItem(key, "1"); } catch { /* ignore */ }
+      })
+      .catch(() => { /* not critical */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?._id, poCanApprove]);
+
+  const addNotification = (title: string, message: string, link?: string) => {
+    const newNotification: NotificationItem = {
+      id: Date.now().toString(),
+      title,
+      message,
+      time: "Just now",
+      read: false,
+      link,
+    };
+
+    setNotifications(prev => [newNotification, ...prev]);
+
+    // Show toast. `window.location.href` (not useNavigate) because this
+    // context sits outside <BrowserRouter> in App.tsx — a plain navigation
+    // is the only option that works from here.
+    toast.info(title, {
+      description: message,
+      ...(link ? { action: { label: "View", onClick: () => { window.location.href = link; } } } : {}),
+    });
+    
+    // Play sound based on user preference
+    const soundPref = user?.notification_sound || "default";
+    playNotificationSound(soundPref);
+  };
+
+  const markAllAsRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+  };
+
+  const markAsRead = (id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+  };
+
+  const notifiedMeetings = useRef<Set<string>>(new Set());
+
+  const { data: meetings = [] } = useQuery({
+    queryKey: ['meetings-notifications'],
+    queryFn: async () => {
+      try {
+        const res = await meetingService.getMeetings();
+        return Array.isArray(res) ? res : res?.data || [];
+      } catch (err) {
+        return [];
+      }
+    },
+    refetchInterval: 60000,
+    enabled: !!user?._id,
+  });
+
+  useEffect(() => {
+    if (meetings.length === 0) return;
+
+    const timer = setInterval(() => {
+      const now = new Date();
+      
+      meetings.forEach((meeting: any) => {
+        if (!meeting.date || !meeting.time || notifiedMeetings.current.has(meeting._id) || meeting.status === "Cancelled" || meeting.status === "Completed") return;
+        
+        const meetingDate = new Date(meeting.date);
+        if (isNaN(meetingDate.getTime())) return;
+        
+        const [hours, minutes] = meeting.time.split(':').map(Number);
+        meetingDate.setHours(hours, minutes, 0, 0);
+        
+        const reminderMinutes = meeting.reminder_time !== undefined ? Number(meeting.reminder_time) : 15;
+        const timeDiffMs = meetingDate.getTime() - now.getTime();
+        const timeDiffMinutes = timeDiffMs / (1000 * 60);
+
+        if (timeDiffMinutes <= reminderMinutes && timeDiffMinutes > -5) {
+          addNotification(
+            "Upcoming Meeting Reminder",
+            `${meeting.topic} starts in ${Math.round(Math.max(0, timeDiffMinutes))} minutes.`
+          );
+          notifiedMeetings.current.add(meeting._id);
+        }
+      });
+    }, 15000);
+    
+    return () => clearInterval(timer);
+  }, [meetings, user]);
+
+  // Global socket listener for chat notifications
+  useEffect(() => {
+    if (!user?._id) return;
+
+    const socket = io(import.meta.env.VITE_SOCKET_URL || (import.meta.env.MODE === "development"
+      ? "http://localhost:5000"
+      : "https://api.citysmile.in"), {
+      withCredentials: true,
+    });
+
+    const tenantId = (user as any)?.tenant?._id;
+    const joinRooms = () => {
+      socket.emit("join", user._id);
+      // A calling-agent update with no single assigned staff member (an
+      // unrecognized-caller or ambiguous-match row) is broadcast to this
+      // room instead — see Backend's src/utils/callingAgentSocket.js. Same
+      // generic "join" mechanism, just a different room name.
+      if (tenantId) socket.emit("join", `tenant-${tenantId}`);
+    };
+    // Re-join on every connect, not just the first one — socket.io
+    // reconnects silently after a network blip, sleep/wake, or backend
+    // restart, and the server has no memory of which room a new connection
+    // belongs to until it's told again. Without this, a reconnect leaves
+    // the socket "live" but deaf to anything room-targeted (e.g. reminderDue).
+    socket.on("connect", joinRooms);
+
+    setSocket(socket);
+
+    socket.on("newMessage", (msg: any) => {
+      // Don't notify if the message is from the current user
+      if (msg.sender._id === user._id) return;
+
+      const isChatPage = window.location.pathname.includes("/admin/chat");
+      const activeChatId = sessionStorage.getItem("activeChatId");
+
+      if (isChatPage && (msg.sender._id === activeChatId || msg.conversationId === activeChatId)) {
+        // User is currently looking at this exact chat thread, no need for a global toast
+        return;
+      }
+
+      setChatUnreadCount(prev => prev + 1);
+
+      addNotification(
+        `New Message from ${msg.sender.firstname}`,
+        msg.message
+      );
+    });
+
+    // Fired by the backend's reminderDelivery cron (Backend/src/cron/reminderDelivery.js)
+    // the moment a Lead or Customer reminder's scheduled time arrives.
+    socket.on("reminderDue", (payload: any) => {
+      // Task deadline reminders come from the Cron Job settings (taskTicketAutomation.js).
+      if (payload?.relType === "task") {
+        addNotification("Task Deadline", payload?.description || "A task is due soon.", `${isStaff ? "/staff" : "/admin"}/tasks`);
+        return;
+      }
+      const title = payload?.relType === "customer" ? "Customer Reminder" : "Lead Reminder";
+      // Only leads have a deep-link target today (Leads.tsx's ?leadView=
+      // param opens that lead straight on its Reminders tab) — customer
+      // reminders still notify, just without a click-through until Customers
+      // gets the same deep-link support.
+      const link = payload?.relType === "lead" && payload?.relId
+        ? `${isStaff ? "/staff" : "/admin"}/leads?leadView=${payload.relId}&tab=reminders`
+        : undefined;
+      addNotification(title, payload?.description || "A reminder is due.", link);
+    });
+
+    // Quotation approval add-on (Backend quotation_controller.js): approvers
+    // hear about new requests, makers hear the decision.
+    socket.on("quotationApproval", (payload: any) => {
+      const base = isStaff ? "/staff" : "/admin";
+      const number = payload?.number || "A quotation";
+      if (payload?.event === "requested") {
+        addNotification("Quotation approval requested", `${payload?.by || "A staff member"} asked you to approve ${number}.`, `${base}/quotations?tab=approvals`);
+      } else if (payload?.event === "approved") {
+        addNotification("Quotation approved", `${number} was approved by ${payload?.by || "an approver"}. You can now send it.`, `${base}/quotations?tab=list`);
+      } else if (payload?.event === "rejected") {
+        const reason = payload?.comment ? ` Reason: ${payload.comment}` : "";
+        addNotification("Quotation rejected", `${number} was rejected by ${payload?.by || "an approver"}.${reason}`, `${base}/quotations?tab=list`);
+      }
+    });
+
+    // Purchase Orders add-on (Backend purchase_order_controller.js): same
+    // pattern — approvers hear about every PO sent for approval (with the
+    // points to check, if any), makers hear Yes/No.
+    socket.on("purchaseOrderApproval", (payload: any) => {
+      const base = isStaff ? "/staff" : "/admin";
+      const number = payload?.number || "A purchase order";
+      const link = payload?.poId ? `${base}/purchase-orders?po=${payload.poId}` : `${base}/purchase-orders`;
+      if (payload?.event === "requested") {
+        // Round 29 (S5): every PO goes for approval — the old text said it broke the pricing rules.
+        const reasons: string[] = Array.isArray(payload?.reasons) ? payload.reasons : [];
+        const points = reasons.length ? ` To check: ${reasons.slice(0, 3).join("; ")}${reasons.length > 3 ? ` (+${reasons.length - 3} more)` : ""}.` : "";
+        addNotification("PO needs your approval", `${number} from ${payload?.by || "a staff member"} is waiting for your approval.${points}`, link);
+      } else if (payload?.event === "approved") {
+        addNotification("PO approved", `${number} was approved by ${payload?.by || "an approver"}.`, link);
+      } else if (payload?.event === "rejected") {
+        const reason = payload?.reason ? ` Reason: ${payload.reason}` : "";
+        addNotification("PO sent back", `${payload?.by || "An approver"} said No to ${number}.${reason}`, link);
+      }
+    });
+
+    // Goals (Backend services/goalProgressService.js): sent once when a goal is
+    // achieved, or once when its end date passes without reaching the target.
+    socket.on("goalUpdate", (payload: any) => {
+      const subject = payload?.subject || "A goal";
+      const link = `${isStaff ? "/staff" : "/admin"}/goals`;
+      if (payload?.event === "achieved") {
+        addNotification("Goal achieved", `${subject} reached its target.`, link);
+      } else if (payload?.event === "failed") {
+        addNotification("Goal not achieved", `${subject} ended without reaching its target.`, link);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+      setSocket(null);
+    };
+  }, [user]);
+
+  return (
+    <NotificationContext.Provider value={{ notifications, unreadCount, chatUnreadCount, addNotification, markAllAsRead, markAsRead, setChatUnreadCount, socket }}>
+      {children}
+    </NotificationContext.Provider>
+  );
+};
+
+export const useNotificationContext = () => useContext(NotificationContext);
